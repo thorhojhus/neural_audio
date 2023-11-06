@@ -5,6 +5,7 @@ import os
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torchaudio
+from torchaudio.functional import add_noise
 import soundfile as sf
 import numpy as np
 import random
@@ -17,148 +18,148 @@ from torchmetrics.audio import ScaleInvariantSignalDistortionRatio
 # local paths
 root_dir = './data/'
 clean_dir = root_dir + 'voice_fullband/'
-noise_dir = root_dir + 'noise_fullband'
+noise_dir = root_dir + 'noise_fullband/'
 
-batch_size = 12
+batch_size = 2
 
-class AudioDataset(Dataset):
-    def __init__(self, root_dir):
+def audio_collate_fn(batch):
+    target_length = 16384*2  # needs to be a power of 2
+
+    # Initialize lists to store processed waveforms
+    processed_clean_waveforms = []
+    processed_noise_waveforms = []
+
+    # Process each sample in the batch
+    for clean_waveform, noise_waveform in batch:
+        current_length = clean_waveform.size(0)
+
+        # If the waveform is shorter than the target length, we pad it
+        if current_length < target_length:
+            # Pad the waveforms to the target length
+            padded_clean_waveform = torch.nn.functional.pad(clean_waveform, (0, target_length - current_length))
+            padded_noise_waveform = torch.nn.functional.pad(noise_waveform, (0, target_length - current_length))
+        else:
+            # Randomly select a start point for trimming if waveform is longer than target
+            start = torch.randint(0, current_length - target_length + 1, (1,)).item()
+            end = start + target_length
+
+            # Trim the waveforms to the target length
+            padded_clean_waveform = clean_waveform[start:end]
+            padded_noise_waveform = noise_waveform[start:end]
+
+        # Add the processed waveforms to the lists
+        processed_clean_waveforms.append(padded_clean_waveform)
+        processed_noise_waveforms.append(padded_noise_waveform)
+
+    # Stack all the processed waveforms together to create batches
+    batched_clean_waveforms = torch.stack(processed_clean_waveforms)
+    batched_noise_waveforms = torch.stack(processed_noise_waveforms)
+
+    snr_value = 10  # signal-to-noise ratio in dB
+    snr_tensor = torch.tensor([snr_value], dtype=torch.float32)
+
+    # The following line adds noise to the batch of clean waveforms to create noisy waveforms
+    noisy_waveforms = add_noise(batched_clean_waveforms, batched_noise_waveforms, snr_tensor).view(-1, 1, target_length)
+    clean_waveforms = batched_clean_waveforms.view(-1, 1, target_length)
+
+    return clean_waveforms, noisy_waveforms
+
+class MixedAudioDataset(Dataset):
+    def __init__(self, clean_dir, noise_dir):
         """
         Args:
-            root_dir (string): Directory with all the audio files.
+            clean_dir (string): Directory with all the clean audio files.
+            noise_dir (string): Directory with all the noise audio files.
+            snr_value (float): The signal-to-noise ratio to be applied when mixing noise with the clean audio.
         """
-        self.root_dir = root_dir
-        self.file_list = self._get_file_list()
+        self.clean_dir = clean_dir
+        self.noise_dir = noise_dir
+        self.clean_file_list = self._get_file_list(clean_dir)
+        self.noise_file_list = self._get_file_list(noise_dir)
 
-    def _get_file_list(self):
+    def _get_file_list(self, directory):
         # Walk the directory to get the list of audio files
         file_list = []
-        for subdir, dirs, files in os.walk(self.root_dir):
+        for subdir, dirs, files in os.walk(directory):
             for file in files:
                 if file.endswith('.wav'):
                     file_list.append(os.path.join(subdir, file))
         return file_list
 
     def __len__(self):
-        return len(self.file_list)
-
+        # The length is determined by the number of clean files
+        return len(self.clean_file_list)
+    
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        audio_path = self.file_list[idx]
-        waveform, sample_rate = sf.read(audio_path, dtype='float32')
+        # Get the clean and noise audio paths
+        clean_audio_path = self.clean_file_list[idx]
+        noise_audio_path = random.choice(self.noise_file_list)  # Randomly select a noise file
         
-        # Convert to PyTorch tensor
-        waveform = torch.from_numpy(waveform)
-        if waveform.ndim == 1:
-            # If mono, add a dimension to mimic a batch
-            waveform = waveform.unsqueeze(0)
-        
-        return waveform, sample_rate
+        # Load the clean and noise waveforms
+        clean_waveform, _ = sf.read(clean_audio_path, dtype='float32')
+        noise_waveform, _ = sf.read(noise_audio_path, dtype='float32')
 
-def audio_collate(batch):
-    """
-    Collate function for the DataLoader to randomly cut segments of the same length from audio files.
-    Args:
-        batch (list): A list of tuples (waveform, sample_rate).
-    
-    Returns:
-        torch.Tensor: Batch of audio segments with the same length.
-    """
-    target_length = 16384 # needs to be base 2
-    batch_segments = []
-    
-    for waveform, sample_rate in batch:
-        # Ensure the waveform is long enough to get a segment
-        if waveform.size(-1) >= target_length:
-            # Randomly choose the start position for slicing
-            max_start_idx = waveform.size(-1) - target_length
-            start_idx = random.randint(0, max_start_idx)
-            segment = waveform[..., start_idx:start_idx+target_length]
-        else:
-            # If the waveform is shorter than the target length, we pad it
-            padding_size = target_length - waveform.size(-1)
-            # You can choose different padding strategies here
-            segment = torch.nn.functional.pad(waveform, (0, padding_size), 'constant', 0)
-        
-        batch_segments.append(segment)
+        clean_waveform = torch.from_numpy(clean_waveform)
+        noise_waveform = torch.from_numpy(noise_waveform)
 
-    # Stack all the segments along a new dimension
-    batch_segments = torch.stack(batch_segments, dim=0)
-    
-    return batch_segments
+        # Ensure noise is the same length as the clean waveform
+        min_len = min(len(clean_waveform), len(noise_waveform))
+        clean_waveform = clean_waveform[:min_len]
+        noise_waveform = noise_waveform[:min_len]
 
-
-
-audio_dataset = AudioDataset(root_dir=clean_dir)
-noise_dataset = AudioDataset(root_dir=noise_dir)
-
-# Now, you can use this collate function in the DataLoader.
-clean_audio_dataloader = DataLoader(audio_dataset, batch_size=batch_size, shuffle=True, collate_fn=audio_collate)
-
-noise_audio_dataloader = DataLoader(noise_dataset, batch_size=batch_size, shuffle=False, collate_fn=audio_collate)
+        return clean_waveform.squeeze(0), noise_waveform.squeeze(0)
 
 model_path = dac.utils.download(model_type="44khz")
 model = dac.DAC.load(model_path).cuda()
 
-si_sdr = ScaleInvariantSignalDistortionRatio().cuda()
+si_sdr_metric = ScaleInvariantSignalDistortionRatio().cuda()
 
 # Set up the optimizer
-learning_rate = 0.001
+learning_rate = 0.0001
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-# Loss criterion
-criterion = torch.nn.MSELoss()
 
 # Set the model to training mode
 model.train()
 
-num_epochs = 10  # Define the number of epochs for training
+clip_value = 1.0 
+
+# Enable anomaly detection to find NaN-producing operations
+torch.autograd.set_detect_anomaly(True)
+
+num_epochs = 10 
+dataset = MixedAudioDataset(clean_dir=clean_dir, noise_dir=noise_dir)
+
+dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=audio_collate_fn)
 
 for epoch in range(num_epochs):
     running_loss = 0.0
-    i = 0
-    for clean_audio, noise_audio in zip(clean_audio_dataloader, noise_audio_dataloader):
-        # Ensure the shapes are the same for clean and noise audio
-        assert clean_audio.shape == noise_audio.shape
-        
-        # Move data to the appropriate device (GPU in this case)
-        clean_audio = clean_audio.cuda()
-        noise_audio = noise_audio.cuda()
+    for i, (clean, noise) in enumerate(dataloader):
+        clean, noise = clean.cuda(), noise.cuda()
 
-        # Calculate the noise to add based on SNR
-        snr = torch.Tensor([5]).cuda()
-        noise_clean_combined = torchaudio.functional.add_noise(clean_audio.squeeze(1), noise_audio.squeeze(1), snr)
-        noise_clean_combined = noise_clean_combined.unsqueeze(1)
-        
-        # Zero the parameter gradients
         optimizer.zero_grad()
 
-        # Forward pass to get the reconstructed audio from the noisy input
-        z, codes, latents, _, _ = model.encode(noise_clean_combined, 48000)
-        recon_audio = model.decode(z)
+        recon = model(noise)["audio"]
 
-        # Calculate the loss (we're using SI-SDR here, but you might need to use a different loss for training)
-        loss = -si_sdr(recon_audio, clean_audio)
+        loss = -si_sdr_metric(recon, clean)
 
-        # Backward pass and optimize
-        loss.backward()
-        optimizer.step()
+        # Check for NaN in loss and skip backprop if detected
+        if not torch.isnan(loss):
+            loss.backward()
+            
+            # Clip gradients to prevent explosion
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
+            
+            optimizer.step()
+
+            running_loss += loss.item()
 
         # Print statistics
-        running_loss += loss.item()
-        if i % 100 == 99:  # print every 100 mini-batches
-            print('[%d, %5d] loss: %.3f' % (epoch + 1, i + 1, running_loss / 100))
+        if (i + 1) % 100 == 0:
+            average_loss = running_loss / 100 if running_loss != 0 else running_loss
+            print(f'Epoch {epoch + 1}, Batch {i + 1}, Loss: {average_loss:.4f}')
             running_loss = 0.0
-        i += 1
-
-    # Print epoch loss
-    print(f"Epoch {epoch+1}/{num_epochs}, Loss: {running_loss/len(clean_audio_dataloader)}")
-
-    # Validation step could be added here if you have a validation set
 
 print('Finished Training')
-
-# Save trained model
-torch.save(model.state_dict(), 'model.pth')
