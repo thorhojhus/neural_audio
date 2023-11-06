@@ -10,8 +10,15 @@ import numpy as np
 import random
 from torchmetrics.audio import ScaleInvariantSignalDistortionRatio
 
-clean_dir = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
-noise_dir = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
+# root_dir = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/'
+# clean_dir = root_dir + 'clean_fullband/vctk_wav48_silence_trimmed/'
+# noise_dir = root_dir + 'noise_fullband'
+
+# local paths
+root_dir = './data/'
+clean_dir = root_dir + 'voice_fullband/'
+noise_dir = root_dir + 'noise_fullband'
+
 batch_size = 12
 
 class AudioDataset(Dataset):
