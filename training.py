@@ -7,7 +7,8 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchaudio.functional import add_noise
 import torchaudio
-from torchmetrics.audio import ScaleInvariantSignalDistortionRatio
+from torch.nn import L1Loss
+from torchmetrics.audio import ScaleInvariantSignalDistortionRatio#, ShortTimeObjectiveIntelligibility, PerceptualEvaluationSpeechQuality
 
 # root_dir = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/'
 # clean_dir = root_dir + 'clean_fullband/vctk_wav48_silence_trimmed/'
@@ -19,13 +20,16 @@ root_dir = './data/'
 clean_dir = root_dir + 'voice_fullband/'
 noise_dir = root_dir + 'noise_fullband/'
 
-batch_size = 2
-target_length = 2**15  # needs to be a power of 2
-learning_rate = 5e-5
+batch_size = 1
+target_length = 2**16  # needs to be a power of 2
+learning_rate = 3e-4
 clip_value = 1.0 
 num_epochs = 10 
+snr_value = 10
 
 def audio_collate_fn(batch):
+
+
     # Initialize lists to store processed waveforms
     processed_clean_waveforms = []
     processed_noise_waveforms = []
@@ -56,7 +60,6 @@ def audio_collate_fn(batch):
     batched_clean_waveforms = torch.stack(processed_clean_waveforms)
     batched_noise_waveforms = torch.stack(processed_noise_waveforms)
 
-    snr_value = 10  # signal-to-noise ratio in dB
     snr_tensor = torch.tensor([snr_value], dtype=torch.float32)
 
     # The following line adds noise to the batch of clean waveforms to create noisy waveforms
@@ -114,6 +117,10 @@ model.train()
 
 # Initialize loss function and optimizer
 si_sdr_metric = ScaleInvariantSignalDistortionRatio().cuda()
+#stoi_metric = ShortTimeObjectiveIntelligibility(fs=48000).cuda()
+#pesq_metric = PerceptualEvaluationSpeechQuality(sample_rate=48000, mode='wb').cuda()
+#l1_loss_criterion = L1Loss().cuda()
+
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
 # Initialize dataset and dataloader
@@ -123,21 +130,23 @@ dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn
 
 for epoch in range(num_epochs):
     running_loss = 0.0
-    for i, (clean, noise) in enumerate(dataloader):
-        clean, noise = clean.cuda(), noise.cuda()
+    for i, (clean, noisy) in enumerate(dataloader):
+        clean, noisy = clean.cuda(), noisy.cuda()
 
         optimizer.zero_grad()
-        recon = model(noise)["audio"]
+        recon = model(noisy)["audio"]
 
         loss = -si_sdr_metric(recon, clean)
+        #stoi_loss = -stoi_metric(recon, clean)
+        #pesq_loss = -pesq_metric(recon, clean)
+        #l1_loss_value = l1_loss_criterion(recon, clean)
+
+        #combined_loss = si_sdr_loss + stoi_loss + l1_loss_value
 
         # Check for NaN in loss and skip backprop if detected
         if not torch.isnan(loss):
             loss.backward()
-            
-            # Clip gradients to prevent explosion
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
-            
             optimizer.step()
 
             running_loss += loss.item()
@@ -149,9 +158,9 @@ for epoch in range(num_epochs):
             running_loss = 0.0
 
             # Save model and reconstructions every epoch
-            torchaudio.save(out_dir+f'audio_sample_recon_epoch_{epoch}_batch_{i}.wav', recon[0].cpu().detach(), 48000)
-            torchaudio.save(out_dir+f'audio_sample_clean_epoch_{epoch}_batch_{i}.wav', clean[0].cpu().detach(), 48000)
-            torchaudio.save(out_dir+f'audio_sample_noise_epoch_{epoch}_batch_{i}.wav', noise[0].cpu().detach(), 48000)
-            torch.save(model.state_dict(), out_dir+f'dac_model_epoch_{epoch}_batch_{i}.pth')
+            torchaudio.save(out_dir+f'recon_epoch_{epoch}_batch_{i+1}.wav', recon[0].cpu().detach(), 44000)
+            torchaudio.save(out_dir+f'clean_epoch_{epoch}_batch_{i+1}.wav', clean[0].cpu().detach(), 44000)
+            torchaudio.save(out_dir+f'noise_epoch_{epoch}_batch_{i+1}.wav', noisy[0].cpu().detach(), 44000)
+            #torch.save(model.state_dict(), out_dir+f'dac_model_epoch_{epoch}_batch_{i}.pth')
 
 print('Finished Training')
