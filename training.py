@@ -1,14 +1,12 @@
-import torch.optim as optim
-
 import dac
 import os
-import torch
-from torch.utils.data import Dataset, DataLoader
-import torchaudio
-from torchaudio.functional import add_noise
-import soundfile as sf
-import numpy as np
 import random
+import soundfile as sf
+import torch
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from torchaudio.functional import add_noise
+import torchaudio
 from torchmetrics.audio import ScaleInvariantSignalDistortionRatio
 
 # root_dir = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/'
@@ -16,15 +14,18 @@ from torchmetrics.audio import ScaleInvariantSignalDistortionRatio
 # noise_dir = root_dir + 'noise_fullband'
 
 # local paths
+out_dir = './output/'
 root_dir = './data/'
 clean_dir = root_dir + 'voice_fullband/'
 noise_dir = root_dir + 'noise_fullband/'
 
 batch_size = 2
+target_length = 2**15  # needs to be a power of 2
+learning_rate = 5e-5
+clip_value = 1.0 
+num_epochs = 10 
 
 def audio_collate_fn(batch):
-    target_length = 16384*2  # needs to be a power of 2
-
     # Initialize lists to store processed waveforms
     processed_clean_waveforms = []
     processed_noise_waveforms = []
@@ -66,12 +67,6 @@ def audio_collate_fn(batch):
 
 class MixedAudioDataset(Dataset):
     def __init__(self, clean_dir, noise_dir):
-        """
-        Args:
-            clean_dir (string): Directory with all the clean audio files.
-            noise_dir (string): Directory with all the noise audio files.
-            snr_value (float): The signal-to-noise ratio to be applied when mixing noise with the clean audio.
-        """
         self.clean_dir = clean_dir
         self.noise_dir = noise_dir
         self.clean_file_list = self._get_file_list(clean_dir)
@@ -112,27 +107,19 @@ class MixedAudioDataset(Dataset):
 
         return clean_waveform.squeeze(0), noise_waveform.squeeze(0)
 
+# Load model
 model_path = dac.utils.download(model_type="44khz")
 model = dac.DAC.load(model_path).cuda()
-
-si_sdr_metric = ScaleInvariantSignalDistortionRatio().cuda()
-
-# Set up the optimizer
-learning_rate = 0.0001
-optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-# Set the model to training mode
 model.train()
 
-clip_value = 1.0 
+# Initialize loss function and optimizer
+si_sdr_metric = ScaleInvariantSignalDistortionRatio().cuda()
+optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-# Enable anomaly detection to find NaN-producing operations
-torch.autograd.set_detect_anomaly(True)
-
-num_epochs = 10 
+# Initialize dataset and dataloader
 dataset = MixedAudioDataset(clean_dir=clean_dir, noise_dir=noise_dir)
-
 dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=audio_collate_fn)
+
 
 for epoch in range(num_epochs):
     running_loss = 0.0
@@ -140,7 +127,6 @@ for epoch in range(num_epochs):
         clean, noise = clean.cuda(), noise.cuda()
 
         optimizer.zero_grad()
-
         recon = model(noise)["audio"]
 
         loss = -si_sdr_metric(recon, clean)
@@ -161,5 +147,11 @@ for epoch in range(num_epochs):
             average_loss = running_loss / 100 if running_loss != 0 else running_loss
             print(f'Epoch {epoch + 1}, Batch {i + 1}, Loss: {average_loss:.4f}')
             running_loss = 0.0
+
+            # Save model and reconstructions every epoch
+            torchaudio.save(out_dir+f'audio_sample_recon_epoch_{epoch}_batch_{i}.wav', recon[0].cpu().detach(), 48000)
+            torchaudio.save(out_dir+f'audio_sample_clean_epoch_{epoch}_batch_{i}.wav', clean[0].cpu().detach(), 48000)
+            torchaudio.save(out_dir+f'audio_sample_noise_epoch_{epoch}_batch_{i}.wav', noise[0].cpu().detach(), 48000)
+            torch.save(model.state_dict(), out_dir+f'dac_model_epoch_{epoch}_batch_{i}.pth')
 
 print('Finished Training')
