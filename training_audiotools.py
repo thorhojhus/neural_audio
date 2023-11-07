@@ -1,12 +1,14 @@
 from audiotools.data.datasets import AudioDataset, AudioLoader
 from audiotools import AudioSignal
-from audiotools.core import util
-import dac
 from flatten_dict import flatten, unflatten
-import argbind
+
 import torch
 import torch.optim as optim
+
 from torch.utils.data import Dataset, DataLoader
+from torch.cuda.amp import GradScaler, autocast
+
+import dac
 from dac.nn.loss import L1Loss, MelSpectrogramLoss, SISDRLoss, MultiScaleSTFTLoss, GANLoss
 
 
@@ -47,6 +49,19 @@ mel_loss = MelSpectrogramLoss().cuda()
 waveform_loss = L1Loss().cuda()
 sisdr_loss = SISDRLoss().cuda()
 
+
+# Weighting for losses
+#############################################
+loss_weights = {
+    "mel/loss": 15.0, 
+    "adv/feat_loss": 2.0, 
+    "adv/gen_loss": 1.0, 
+    "vq/commitment_loss": 0.25, 
+    "vq/codebook_loss": 1.0,
+    "stft/loss": 1.0,
+    "sisdr/loss": 20.0,
+    }
+
 # Helper functions
 #############################################
 def make_noisy(clean, noise, snr=10):
@@ -73,66 +88,61 @@ def prep_batch(batch, device="cuda"):
     return batch
 
 
-# Weighting for losses
-#############################################
-loss_weights = {
-    "mel/loss": 15.0, 
-    "adv/feat_loss": 2.0, 
-    "adv/gen_loss": 1.0, 
-    "vq/commitment_loss": 0.25, 
-    "vq/codebook_loss": 1.0,
-    "stft/loss": 1.0,
-    "sisdr/loss": 20.0,
-    }
-
-
 # Training loop function
 #############################################
-def train_loop(voice_noisy,
-               voice_clean):
-    
+scaler = GradScaler()
+
+
+def train_loop(voice_noisy, voice_clean):
+    voice_noisy, voice_clean = prep_batch(voice_noisy), prep_batch(voice_clean)
     generator.train()
     discriminator.train()
     
     output = {}
     signal = voice_clean["signal"]
     
-    out = generator(voice_noisy.audio_data, voice_noisy.sample_rate)
-    recons = AudioSignal(out["audio"], voice_noisy.sample_rate)
-    commitment_loss = out["vq/commitment_loss"]
-    codebook_loss = out["vq/codebook_loss"]
+    # Forward pass with mixed precision
+    with autocast():
+        out = generator(voice_noisy.audio_data, voice_noisy.sample_rate)
+        recons = AudioSignal(out["audio"], voice_noisy.sample_rate)
+        commitment_loss = out["vq/commitment_loss"]
+        codebook_loss = out["vq/codebook_loss"]
 
+        output["adv/disc_loss"] = gan_loss.discriminator_loss(recons, signal)
+
+        output["stft/loss"] = stft_loss(recons, signal)
+        output["mel/loss"] = mel_loss(recons, signal)
+        output["waveform/loss"] = waveform_loss(recons, signal)
+        output["sisdr/loss"] = sisdr_loss(recons, signal)
+        output["adv/gen_loss"], output["adv/feat_loss"] = gan_loss.generator_loss(recons, signal)
+        output["vq/commitment_loss"] = commitment_loss
+        output["vq/codebook_loss"] = codebook_loss
+        output["loss"] = sum([v * output[k] for k, v in loss_weights.items() if k in output])
+
+    # Discriminator optimization step
     optimizer_d.zero_grad()
-    output["adv/disc_loss"] = gan_loss.discriminator_loss(recons, signal)
-    output["adv/disc_loss"].backward()
-    optimizer_d.step()
-    
+    scaler.scale(output["adv/disc_loss"]).backward()
     output["other/grad_norm_d"] = torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 10.0)
-    
+    scaler.step(optimizer_d)
+    scaler.update()
 
-    output["stft/loss"] = stft_loss(recons, signal)
-    output["mel/loss"] = mel_loss(recons, signal)
-    output["waveform/loss"] = waveform_loss(recons, signal)
-    output["sisdr/loss"] = sisdr_loss(recons, signal)
-    output["adv/gen_loss"], output["adv/feat_loss"] = gan_loss.generator_loss(recons, signal)
-    output["vq/commitment_loss"] = commitment_loss
-    output["vq/codebook_loss"] = codebook_loss
-    output["loss"] = sum([v * output[k] for k, v in loss_weights.items() if k in output])
-
+    # Generator optimization step
     optimizer_g.zero_grad()
-    output["loss"].backward()
-    optimizer_g.step()
-    output["other/grad_norm"] = torch.nn.utils.clip_grad_norm_(generator.parameters(), 1e3)
+    scaler.scale(output["loss"]).backward()
+    output["other/grad_norm_g"] = torch.nn.utils.clip_grad_norm_(generator.parameters(), 1e3)
+    scaler.step(optimizer_g)
+    scaler.update()
 
     optimizer_g.zero_grad()
     optimizer_d.zero_grad()
 
-    return {k: v for k, v in sorted(output.items())}
+    return {k: v.item() for k, v in sorted(output.items())}
+
 
 # Save audio samples
 #############################################
 @torch.no_grad()
-def save_samples():
+def save_samples(epoch, i):
     generator.eval()
     noise, clean = noise_dataset[1], voice_dataset[1]
     noisy = make_noisy(clean, noise).cuda()
@@ -140,9 +150,9 @@ def save_samples():
     out = generator(noisy.audio_data.cuda(), noisy.sample_rate)["audio"]
     recons = AudioSignal(out.detach().cpu(), 44100)
 
-    recons.write("./output/recons.wav")
-    noisy.cpu().write("./output/noisy.wav")
-    clean["signal"].cpu().write("./output/clean.wav")
+    recons.write(f"./output/recons_e{epoch}b{i}.wav")
+    noisy.cpu().write(f"./output/noisy_e{epoch}b{i}.wav")
+    clean["signal"].cpu().write(f"./output/clean_e{epoch}b{i}.wav")
     generator.train()
 
 
@@ -154,11 +164,10 @@ for epoch in range(n_epochs):
         
         voice_noisy = make_noisy(voice_clean, noise_dataset[i]).cuda()
         
-        noisy_batch, voice_batch = prep_batch(voice_noisy), prep_batch(voice_clean)
+        #noisy_batch, voice_batch = prep_batch(voice_noisy), prep_batch(voice_clean)
         
-        out = train_loop(noisy_batch, voice_batch)
-        
+        out = train_loop(voice_noisy, voice_clean)
         if i % 100 == 0:
             print(f"Batch {i}: {out}")
-            save_samples()
+            save_samples(epoch, i)
     torch.save(generator.state_dict(), f"./output/dac_model_epoch_{epoch}.pth")
