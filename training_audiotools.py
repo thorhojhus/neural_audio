@@ -9,26 +9,38 @@ from torch.utils.data import Dataset, DataLoader
 from torch.cuda.amp import GradScaler, autocast
 
 import numpy as np
+import os
 
 import dac
 from dac.nn.loss import L1Loss, MelSpectrogramLoss, SISDRLoss, MultiScaleSTFTLoss, GANLoss
 import wandb
+# try:
+#     from pesq import pesq
+#     from pystoi import stoi
+#     from torchaudio.pipelines import SQUIM_OBJECTIVE, SQUIM_SUBJECTIVE
+# except ImportError:
+#     print("Please install pesq, pystoi and torchaudio to run this example.")
+
 
 device = "cpu"
 if torch.cuda.is_available():
-    device = "cuda:0"
+    device = "cuda"
+    torch.backends.cudnn.benchmark = True
 
-print(device)
+print("Using device:", device)
+print()
 
-voice_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
-noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
+# voice_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
+# noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
 
+voice_folder = './data/voice_fullband'
+noise_folder = './data/noise_fullband'
 
-lr = 1e-4
+lr = 1e-5
 batch_size = 2
 n_epochs = 2 
-
-use_wandb = True
+do_print = False
+use_wandb = False
 
 if use_wandb:
     wandb.init(
@@ -57,6 +69,7 @@ voice_dataloader = DataLoader(voice_dataset, batch_size=batch_size, shuffle=Fals
 model_path = dac.utils.download(model_type="44khz")
 generator = dac.DAC.load(model_path).to(device)
 discriminator = dac.model.Discriminator().to(device)
+#subjective_model = SQUIM_SUBJECTIVE.get_model()
 
 # Optimizers
 #############################################
@@ -83,7 +96,7 @@ loss_weights = {
     "vq/commitment_loss": 0.25, 
     "vq/codebook_loss": 1.0,
     "stft/loss": 1.0,
-    "sdr/loss": 20.0,
+    "sdr/loss": -50.0,
     }
 
 # Helper functions
@@ -129,52 +142,52 @@ scaler = GradScaler()
 
 def train_loop_mixed_precision(voice_noisy, voice_clean):
     voice_noisy, voice_clean = prep_batch(voice_noisy), prep_batch(voice_clean)
+
     generator.train()
     discriminator.train()
-    
+
     output = {}
     signal = voice_clean["signal"]
-    
-    # Forward pass with mixed precision
+
+    # Forward pass with autocast
     with autocast():
         out = generator(voice_noisy.audio_data, voice_noisy.sample_rate)
         recons = AudioSignal(out["audio"], voice_noisy.sample_rate)
         commitment_loss = out["vq/commitment_loss"]
         codebook_loss = out["vq/codebook_loss"]
-    with autocast():
+
         output["adv/disc_loss"] = gan_loss.discriminator_loss(recons, signal)
-    
-    # Discriminator optimization step
-    optimizer_d.zero_grad()
-    scaler.scale(output["adv/disc_loss"]).backward()
-    scaler.unscale_(optimizer_g)
-    output["other/grad_norm_d"] = torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 10.0)
-    scaler.step(optimizer_d)
-    scaler.update()
 
-
-    with autocast():
         output["stft/loss"] = stft_loss(recons, signal)
         output["mel/loss"] = mel_loss(recons, signal)
         output["waveform/loss"] = waveform_loss(recons, signal)
-        output["sisdr/loss"] = sisdr_loss(recons, signal)
+        output["sdr/loss"] = sdr_loss(recons.audio_data, signal.audio_data)
         output["adv/gen_loss"], output["adv/feat_loss"] = gan_loss.generator_loss(recons, signal)
         output["vq/commitment_loss"] = commitment_loss
         output["vq/codebook_loss"] = codebook_loss
         output["loss"] = sum([v * output[k] for k, v in loss_weights.items() if k in output])
 
-    # Generator optimization step
+    # Backward and optimize for discriminator
+    optimizer_d.zero_grad()
+    scaler.scale(output["adv/disc_loss"]).backward()
+    scaler.step(optimizer_d)
+
+    output["other/grad_norm_d"] = torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 10.0)
+
+    # Backward and optimize for generator
     optimizer_g.zero_grad()
     scaler.scale(output["loss"]).backward()
-    scaler.unscale_(optimizer_g)
-    output["other/grad_norm_g"] = torch.nn.utils.clip_grad_norm_(generator.parameters(), 1e3)
     scaler.step(optimizer_g)
     scaler.update()
 
-    optimizer_g.zero_grad()
-    optimizer_d.zero_grad()
+    output["other/grad_norm"] = torch.nn.utils.clip_grad_norm_(generator.parameters(), 1e3)
 
-    return {k: v.item() for k, v in sorted(output.items())}
+    log_data = {k: v.item() if torch.is_tensor(v) else v for k, v in output.items()}
+    
+    if use_wandb:
+        wandb.log(log_data)
+
+    return {k: v for k, v in sorted(output.items())}
 
 # Training loop function
 #############################################
@@ -224,9 +237,25 @@ def train_loop(voice_noisy,
 
     return {k: v for k, v in sorted(output.items())}
 
+
+@torch.no_grad()
+def val_loop(voice_noisy,
+             voice_clean):
+    
+    voice_noisy, voice_clean = prep_batch(voice_noisy), prep_batch(voice_clean)
+    output = {}
+    signal = voice_clean["signal"]
+    out = generator(voice_noisy.audio_data, voice_noisy.sample_rate)
+    recons = AudioSignal(out["audio"], voice_noisy.sample_rate)
+    output["SI-SDR"] = sisdr_loss(recons.audio_data, signal.audio_data)
+    #output["mos"] = subjective_model(recons.audio_data, signal.audio_data)
+    log_data = {k: v.item() if torch.is_tensor(v) else v for k, v in output.items()}
+    if use_wandb:
+        wandb.log(log_data)
+    return {k: v.item() if torch.is_tensor(v) else v for k, v in sorted(output.items())}
+
 @torch.no_grad()
 def save_samples(epoch, i):
-    generator.eval()
     noise, clean = noise_dataset[1], voice_dataset[1]
     noisy = make_noisy(clean, noise).to(device)
 
@@ -254,12 +283,23 @@ print("Starting traing")
 for epoch in range(n_epochs):
     print(f"Epoch: {epoch}")
     print()
+    
     for i, voice_clean in enumerate(voice_dataloader):
         
         voice_noisy = make_noisy(voice_clean, noise_dataset[i]).to(device)
-            
+        generator.train()
+        discriminator.train()
         out = train_loop(voice_noisy, voice_clean)
-        if i % 100 == 0:
-            print(f"Batch {i}: \n\n{pretty_print_output(out)}")
+    
+        if (i % 250 == 0) & (i != 0):
+            if do_print:
+                print(f"\nBatch {i}:\n")
+                pretty_print_output(out)
+            generator.eval()
             save_samples(epoch, i)
+            output = val_loop(voice_noisy, voice_clean)
+            if do_print:
+                print("\nValidation:\n")
+                pretty_print_output(output)
+    
     torch.save(generator.state_dict(), f"./output/dac_model_epoch_{epoch}.pth")
