@@ -1,7 +1,7 @@
 from audiotools.data.datasets import AudioDataset, AudioLoader
 from audiotools import AudioSignal
 from flatten_dict import flatten, unflatten
-
+from torchmetrics.audio import SignalDistortionRatio as SDR
 import torch
 import torch.optim as optim
 
@@ -68,18 +68,19 @@ stft_loss = MultiScaleSTFTLoss().to(device)
 mel_loss = MelSpectrogramLoss().to(device)
 waveform_loss = L1Loss().to(device)
 sisdr_loss = SISDRLoss().to(device)
+sdr_loss = SDR().to(device)
 
 
 # Weighting for losses
 #############################################
 loss_weights = {
-    "mel/loss": 15.0, 
-    "adv/ƒ": 2.0, 
+    "mel/loss": 100.0, 
+    "adv/feat_loss": 2.0, 
     "adv/gen_loss": 1.0, 
     "vq/commitment_loss": 0.25, 
     "vq/codebook_loss": 1.0,
     "stft/loss": 1.0,
-    "sisdr/loss": 20.0,
+    "sdr/loss": 20.0,
     }
 
 # Helper functions
@@ -88,7 +89,7 @@ def make_noisy(clean, noise, snr=5):
     return clean["signal"].clone().mix(noise["signal"], snr=snr)
 
 
-def prep_batch(batch, device="cuda"):
+def prep_batch(batch):
     if isinstance(batch, dict):
         batch = flatten(batch)
         for key, val in batch.items():
@@ -175,8 +176,7 @@ def train_loop_mixed_precision(voice_noisy, voice_clean):
 # Training loop function
 #############################################
 def train_loop(voice_noisy,
-               voice_clean,
-               batch_num):
+               voice_clean):
     voice_noisy, voice_clean = prep_batch(voice_noisy), prep_batch(voice_clean)
 
     generator.train()
@@ -197,11 +197,10 @@ def train_loop(voice_noisy,
 
     output["other/grad_norm_d"] = torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 10.0)
 
-
     output["stft/loss"] = stft_loss(recons, signal)
     output["mel/loss"] = mel_loss(recons, signal)
     output["waveform/loss"] = waveform_loss(recons, signal)
-    output["sisdr/loss"] = sisdr_loss(recons, signal)
+    output["sdr/loss"] = sdr_loss(recons.audio_data, signal.audio_data)
     output["adv/gen_loss"], output["adv/feat_loss"] = gan_loss.generator_loss(recons, signal)
     output["vq/commitment_loss"] = commitment_loss
     output["vq/codebook_loss"] = codebook_loss
@@ -215,7 +214,6 @@ def train_loop(voice_noisy,
     optimizer_g.zero_grad()
     optimizer_d.zero_grad()
     log_data = {k: v.item() if torch.is_tensor(v) else v for k, v in output.items()}
-    #log_data["batch_num"] = batch_num
     wandb.log(log_data)
 
 
@@ -255,9 +253,8 @@ for epoch in range(n_epochs):
         
         voice_noisy = make_noisy(voice_clean, noise_dataset[i]).to(device)
             
-        out = train_loop(voice_noisy, voice_clean, batch_num=i)
-        pretty_print_output(out)
+        out = train_loop(voice_noisy, voice_clean)
         if i % 100 == 0:
-            print(f"Batch {i}: \n{out}")
+            print(f"Batch {i}: \n\n{pretty_print_output(out)}")
             save_samples(epoch, i)
     torch.save(generator.state_dict(), f"./output/dac_model_epoch_{epoch}.pth")
