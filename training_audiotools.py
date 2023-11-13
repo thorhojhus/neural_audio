@@ -28,18 +28,21 @@ lr = 1e-4
 batch_size = 2
 n_epochs = 2 
 
-wandb.init(
-    # set the wandb project where this run will be logged
-    project="Audio-project",
-    
-    # track hyperparameters and run metadata
-    config={
-    "learning_rate": lr,
-    "architecture": "VQ-VAE",
-    "dataset": "VCTK",
-    "epochs": n_epochs,
-    }
-)
+use_wandb = True
+
+if use_wandb:
+    wandb.init(
+        # set the wandb project where this run will be logged
+        project="Audio-project",
+        
+        # track hyperparameters and run metadata
+        config={
+        "learning_rate": lr,
+        "architecture": "VQ-VAE",
+        "dataset": "VCTK",
+        "epochs": n_epochs,
+        }
+    )
 
 # Dataloaders and datasets
 #############################################
@@ -214,7 +217,9 @@ def train_loop(voice_noisy,
     optimizer_g.zero_grad()
     optimizer_d.zero_grad()
     log_data = {k: v.item() if torch.is_tensor(v) else v for k, v in output.items()}
-    wandb.log(log_data)
+    
+    if use_wandb:
+        wandb.log(log_data)
 
 
     return {k: v for k, v in sorted(output.items())}
@@ -237,11 +242,11 @@ def save_samples(epoch, i):
     recons.write(recons_path)
     noisy.cpu().write(noisy_path)
     clean["signal"].cpu().write(clean_path)
-
-    # Log audio files to WandB
-    wandb.log({"Reconstructed Audio": wandb.Audio(recons_path, caption=f"Reconstructed Epoch {epoch} Batch {i}"),
-               "Noisy Audio": wandb.Audio(noisy_path, caption=f"Noisy Epoch {epoch} Batch {i}"),
-               "Clean Audio": wandb.Audio(clean_path, caption=f"Clean Epoch {epoch} Batch {i}")})
+    if use_wandb:
+        # Log audio files to WandB
+        wandb.log({"Reconstructed Audio": wandb.Audio(recons_path, caption=f"Reconstructed Epoch {epoch} Batch {i}"),
+                "Noisy Audio": wandb.Audio(noisy_path, caption=f"Noisy Epoch {epoch} Batch {i}"),
+                "Clean Audio": wandb.Audio(clean_path, caption=f"Clean Epoch {epoch} Batch {i}")})
 
 # Training loop
 #############################################
