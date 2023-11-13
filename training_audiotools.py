@@ -14,32 +14,22 @@ import os
 import dac
 from dac.nn.loss import L1Loss, MelSpectrogramLoss, SISDRLoss, MultiScaleSTFTLoss, GANLoss
 import wandb
-# try:
-#     from pesq import pesq
-#     from pystoi import stoi
-#     from torchaudio.pipelines import SQUIM_OBJECTIVE, SQUIM_SUBJECTIVE
-# except ImportError:
-#     print("Please install pesq, pystoi and torchaudio to run this example.")
-
 
 device = "cpu"
 if torch.cuda.is_available():
     device = "cuda"
     torch.backends.cudnn.benchmark = True
 
-print("Using device:", device)
-print()
+voice_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
+noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
 
-# voice_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
-# noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
-
-voice_folder = './data/voice_fullband'
-noise_folder = './data/noise_fullband'
+# voice_folder = './data/voice_fullband'
+# noise_folder = './data/noise_fullband'
 
 lr = 1e-5
 batch_size = 2
-n_epochs = 2 
-do_print = False
+n_epochs = 2
+do_print = True
 use_wandb = False
 
 if use_wandb:
@@ -56,13 +46,27 @@ if use_wandb:
         }
     )
 
+def count_files(directory):
+    file_count = 0
+    for root, dirs, files in os.walk(directory):
+        file_count += len(files)
+    return file_count
+
+
+
 # Dataloaders and datasets
 #############################################
 voice_loader = AudioLoader(sources=[voice_folder], shuffle=False)
+voice_count = count_files(voice_folder)
 noise_loader = AudioLoader(sources=[noise_folder], shuffle=True)
-voice_dataset = AudioDataset(voice_loader, sample_rate=44100, duration = 1.0)
-noise_dataset = AudioDataset(noise_loader, sample_rate=44100, duration = 1.0)
-voice_dataloader = DataLoader(voice_dataset, batch_size=batch_size, shuffle=False, collate_fn=voice_dataset.collate, pin_memory=True)
+noise_count = count_files(noise_folder)
+print(f"Number of voice files {voice_count}")
+print(f"Number of noise files {noise_count}")
+
+voice_dataset = AudioDataset(voice_loader,n_examples=voice_count, sample_rate=44100, duration = 1.0)
+noise_dataset = AudioDataset(noise_loader, n_examples=noise_count, sample_rate=44100, duration = 1.0)
+voice_dataloader = DataLoader(voice_dataset, batch_size=batch_size, shuffle=False, collate_fn=voice_dataset.collate, pin_memory=True, num_workers=12)
+
 
 # Models
 #############################################
@@ -149,10 +153,10 @@ def train_loop_mixed_precision(voice_noisy, voice_clean):
     output = {}
     signal = voice_clean["signal"]
 
+    out = generator(voice_noisy.audio_data, voice_noisy.sample_rate)
+    recons = AudioSignal(out["audio"], voice_noisy.sample_rate)
     # Forward pass with autocast
     with autocast():
-        out = generator(voice_noisy.audio_data, voice_noisy.sample_rate)
-        recons = AudioSignal(out["audio"], voice_noisy.sample_rate)
         commitment_loss = out["vq/commitment_loss"]
         codebook_loss = out["vq/codebook_loss"]
 
@@ -279,10 +283,8 @@ def save_samples(epoch, i):
 
 # Training loop
 #############################################
-print("Starting traing")
+print("Starting training")
 for epoch in range(n_epochs):
-    print(f"Epoch: {epoch}")
-    print()
     
     for i, voice_clean in enumerate(voice_dataloader):
         
