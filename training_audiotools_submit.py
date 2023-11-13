@@ -7,24 +7,24 @@ import torch.optim as optim
 
 from torch.utils.data import Dataset, DataLoader
 from torch.cuda.amp import GradScaler, autocast
-
+import os
 import numpy as np
 
 import dac
 from dac.nn.loss import L1Loss, MelSpectrogramLoss, SISDRLoss, MultiScaleSTFTLoss, GANLoss
 import wandb
 
-device = "cpu"
-if torch.cuda.is_available():
-    device = "cuda:0"
+
 
 voice_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
 noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
 
 
 lr = 1e-4
-batch_size = 12 # with duration 1.0 should fill up 40GB
+batch_size = 20 # with duration 1.0 should fill up 40GB
+batch_size = 2
 n_epochs = 2 
+snr = 5
 
 wandb.init(
     # set the wandb project where this run will be logged
@@ -39,19 +39,32 @@ wandb.init(
     }
 )
 
+def count_files(directory):
+    file_count = 0
+    for root, dirs, files in os.walk(directory):
+        file_count += len(files)
+    return file_count
+
+
+
 # Dataloaders and datasets
 #############################################
 voice_loader = AudioLoader(sources=[voice_folder], shuffle=False)
+voice_count = count_files(voice_folder)
 noise_loader = AudioLoader(sources=[noise_folder], shuffle=True)
-voice_dataset = AudioDataset(voice_loader, sample_rate=44100, duration = 1.0)
-noise_dataset = AudioDataset(noise_loader, sample_rate=44100, duration = 1.0)
-voice_dataloader = DataLoader(voice_dataset, batch_size=batch_size, shuffle=False, collate_fn=voice_dataset.collate, pin_memory=True)
+noise_count = count_files(noise_folder)
+print(f"Number of voice files {voice_count}")
+print(f"Number of noise files {noise_count}")
 
+voice_dataset = AudioDataset(voice_loader,n_examples=voice_count, sample_rate=44100, duration = 1.0)
+noise_dataset = AudioDataset(noise_loader, n_examples=noise_count, sample_rate=44100, duration = 1.0)
+voice_dataloader = DataLoader(voice_dataset, batch_size=batch_size, shuffle=False, collate_fn=voice_dataset.collate, pin_memory=True)
+print("Setup dataloaders")
 # Models
 #############################################
 model_path = dac.utils.download(model_type="44khz")
-generator = dac.DAC.load(model_path).to(device)
-discriminator = dac.model.Discriminator().to(device)
+generator = dac.DAC.load(model_path).cuda()
+discriminator = dac.model.Discriminator().cuda()
 
 # Optimizers
 #############################################
@@ -61,28 +74,28 @@ optimizer_d = optim.Adam(discriminator.parameters(), lr=lr)
 
 # Losses
 #############################################
-gan_loss = GANLoss(discriminator).to(device)
-stft_loss = MultiScaleSTFTLoss().to(device)
-mel_loss = MelSpectrogramLoss().to(device)
-waveform_loss = L1Loss().to(device)
-sisdr_loss = SISDRLoss().to(device)
+gan_loss = GANLoss(discriminator).cuda()
+stft_loss = MultiScaleSTFTLoss().cuda()
+mel_loss = MelSpectrogramLoss().cuda()
+waveform_loss = L1Loss().cuda()
+sisdr_loss = SISDRLoss().cuda()
 
 
 # Weighting for losses
 #############################################
 loss_weights = {
     "mel/loss": 15.0, 
-    "adv/ƒ": 2.0, 
+    "adv/feat_loss": 2.0, 
     "adv/gen_loss": 1.0, 
     "vq/commitment_loss": 0.25, 
     "vq/codebook_loss": 1.0,
     "stft/loss": 1.0,
     "sisdr/loss": 20.0,
-    }z
+    }
 
 # Helper functions
 #############################################
-def make_noisy(clean, noise, snr=5):
+def make_noisy(clean, noise, snr=snr):
     return clean["signal"].clone().mix(noise["signal"], snr=snr)
 
 
@@ -223,9 +236,9 @@ def train_loop(voice_noisy,
 def save_samples(epoch, i):
     generator.eval()
     noise, clean = noise_dataset[1], voice_dataset[1]
-    noisy = make_noisy(clean, noise).to(device)
+    noisy = make_noisy(clean, noise).cuda()
 
-    out = generator(noisy.audio_data.to(device), noisy.sample_rate)["audio"]
+    out = generator(noisy.audio_data.cuda(), noisy.sample_rate)["audio"]
     recons = AudioSignal(out.detach().cpu(), 44100)
 
     # Define file paths
@@ -251,10 +264,10 @@ for epoch in range(n_epochs):
     print()
     for i, voice_clean in enumerate(voice_dataloader):
         
-        voice_noisy = make_noisy(voice_clean, noise_dataset[i]).to(device)
+        voice_noisy = make_noisy(voice_clean, noise_dataset[i]).cuda()
             
         out = train_loop(voice_noisy, voice_clean, batch_num=i)
-        pretty_print_output(out)
+        #pretty_print_output(out)
         if i % 100 == 0:
             print(f"Batch {i}: \n{out}")
             save_samples(epoch, i)
