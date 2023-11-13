@@ -36,6 +36,8 @@ Adjust hyperparameters such as learning rates, batch sizes, and epochs within th
 
 Models, logs, and audio samples are saved in the `./output/` directory, allowing for incremental evaluation of the audio processing quality.
 
+See [Wandb for training logs](https://wandb.ai/thorhojhus/Audio-project)
+
 ---
 
 Please refer to the individual scripts for detailed parameter settings and training customizations.
