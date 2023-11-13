@@ -21,9 +21,8 @@ noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_full
 
 
 lr = 1e-4
-batch_size = 20 # with duration 1.0 should fill up 40GB
-batch_size = 2
-n_epochs = 2 
+batch_size = 20 
+n_epochs = 2
 snr = 5
 
 wandb.init(

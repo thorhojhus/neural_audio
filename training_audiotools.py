@@ -18,6 +18,8 @@ device = "cpu"
 if torch.cuda.is_available():
     device = "cuda:0"
 
+print(device)
+
 voice_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
 noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
 
@@ -78,7 +80,7 @@ loss_weights = {
     "vq/codebook_loss": 1.0,
     "stft/loss": 1.0,
     "sisdr/loss": 20.0,
-    }z
+    }
 
 # Helper functions
 #############################################
