@@ -12,8 +12,8 @@ import dac
 from dac.nn.loss import L1Loss, MelSpectrogramLoss, SISDRLoss, MultiScaleSTFTLoss, GANLoss
 
 
-voice_folder = "./data/voice_fullband"
-noise_folder = "./data/noise_fullband"
+voice_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
+noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
 
 
 lr = 1e-4
@@ -88,12 +88,12 @@ def prep_batch(batch, device="cuda"):
     return batch
 
 
-# Training loop function
+# Training loop function mixed precision
 #############################################
 scaler = GradScaler()
 
 
-def train_loop(voice_noisy, voice_clean):
+def train_loop_mixed_precision(voice_noisy, voice_clean):
     voice_noisy, voice_clean = prep_batch(voice_noisy), prep_batch(voice_clean)
     generator.train()
     discriminator.train()
@@ -107,9 +107,19 @@ def train_loop(voice_noisy, voice_clean):
         recons = AudioSignal(out["audio"], voice_noisy.sample_rate)
         commitment_loss = out["vq/commitment_loss"]
         codebook_loss = out["vq/codebook_loss"]
-
+    with autocast():
         output["adv/disc_loss"] = gan_loss.discriminator_loss(recons, signal)
+    
+    # Discriminator optimization step
+    optimizer_d.zero_grad()
+    scaler.scale(output["adv/disc_loss"]).backward()
+    scaler.unscale_(optimizer_g)
+    output["other/grad_norm_d"] = torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 10.0)
+    scaler.step(optimizer_d)
+    scaler.update()
 
+
+    with autocast():
         output["stft/loss"] = stft_loss(recons, signal)
         output["mel/loss"] = mel_loss(recons, signal)
         output["waveform/loss"] = waveform_loss(recons, signal)
@@ -119,16 +129,10 @@ def train_loop(voice_noisy, voice_clean):
         output["vq/codebook_loss"] = codebook_loss
         output["loss"] = sum([v * output[k] for k, v in loss_weights.items() if k in output])
 
-    # Discriminator optimization step
-    optimizer_d.zero_grad()
-    scaler.scale(output["adv/disc_loss"]).backward()
-    output["other/grad_norm_d"] = torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 10.0)
-    scaler.step(optimizer_d)
-    scaler.update()
-
     # Generator optimization step
     optimizer_g.zero_grad()
     scaler.scale(output["loss"]).backward()
+    scaler.unscale_(optimizer_g)
     output["other/grad_norm_g"] = torch.nn.utils.clip_grad_norm_(generator.parameters(), 1e3)
     scaler.step(optimizer_g)
     scaler.update()
@@ -138,6 +142,49 @@ def train_loop(voice_noisy, voice_clean):
 
     return {k: v.item() for k, v in sorted(output.items())}
 
+# Training loop function
+#############################################
+def train_loop(voice_noisy,
+               voice_clean):
+    voice_noisy, voice_clean = prep_batch(voice_noisy), prep_batch(voice_clean)
+
+    generator.train()
+    discriminator.train()
+
+    output = {}
+    signal = voice_clean["signal"]
+
+    out = generator(voice_noisy.audio_data, voice_noisy.sample_rate)
+    recons = AudioSignal(out["audio"], voice_noisy.sample_rate)
+    commitment_loss = out["vq/commitment_loss"]
+    codebook_loss = out["vq/codebook_loss"]
+
+    optimizer_d.zero_grad()
+    output["adv/disc_loss"] = gan_loss.discriminator_loss(recons, signal)
+    output["adv/disc_loss"].backward()
+    optimizer_d.step()
+
+    output["other/grad_norm_d"] = torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 10.0)
+
+
+    output["stft/loss"] = stft_loss(recons, signal)
+    output["mel/loss"] = mel_loss(recons, signal)
+    output["waveform/loss"] = waveform_loss(recons, signal)
+    output["sisdr/loss"] = sisdr_loss(recons, signal)
+    output["adv/gen_loss"], output["adv/feat_loss"] = gan_loss.generator_loss(recons, signal)
+    output["vq/commitment_loss"] = commitment_loss
+    output["vq/codebook_loss"] = codebook_loss
+    output["loss"] = sum([v * output[k] for k, v in loss_weights.items() if k in output])
+
+    optimizer_g.zero_grad()
+    output["loss"].backward()
+    optimizer_g.step()
+    output["other/grad_norm"] = torch.nn.utils.clip_grad_norm_(generator.parameters(), 1e3)
+
+    optimizer_g.zero_grad()
+    optimizer_d.zero_grad()
+
+    return {k: v for k, v in sorted(output.items())}
 
 # Save audio samples
 #############################################
@@ -159,7 +206,10 @@ def save_samples(epoch, i):
 
 # Training loop
 #############################################
+print("Starting traing")
 for epoch in range(n_epochs):
+    print(f"Epoch: {epoch}")
+    print()
     for i, voice_clean in enumerate(voice_dataloader):
         
         voice_noisy = make_noisy(voice_clean, noise_dataset[i]).cuda()
@@ -168,6 +218,6 @@ for epoch in range(n_epochs):
         
         out = train_loop(voice_noisy, voice_clean)
         if i % 100 == 0:
-            print(f"Batch {i}: {out}")
+            print(f"Batch {i}: \n{out}")
             save_samples(epoch, i)
     torch.save(generator.state_dict(), f"./output/dac_model_epoch_{epoch}.pth")
