@@ -6,10 +6,10 @@
 ### -- set the job Name --
 #BSUB -J train_descript_audiocodec
 ### -- ask for number of cores (default: 1) --
-#BSUB -n 12
+#BSUB -n 32
 ### -- Select the resources: 1 gpu in exclusive process mode --
 #BSUB -gpu "num=1:mode=exclusive_process"
-### -- set walltime limit: hh:mm --  maximum 24 hours for GPU-queues right now
+### -- set walltime limit: hh:mm 
 #BSUB -W 02:00
 #BSUB -R "rusage[mem=64GB]"
 ### -- send notification at start --
