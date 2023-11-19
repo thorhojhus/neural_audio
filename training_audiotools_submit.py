@@ -152,57 +152,6 @@ def pretty_print_output(output):
     for key, value in pretty_output_str.items():
         print(f"{key}: {value}")
 
-# Training loop function mixed precision
-#############################################
-scaler = GradScaler()
-def train_loop_mixed_precision(voice_noisy, voice_clean):
-    voice_noisy, voice_clean = prep_batch(voice_noisy), prep_batch(voice_clean)
-
-    output = {}
-    signal = voice_clean["signal"]
-
-    # Initialize the GradScaler
-
-    # Forward pass with autocast for mixed precision
-    with autocast():
-        out = generator(voice_noisy.audio_data, voice_noisy.sample_rate)
-        recons = AudioSignal(out["audio"], voice_noisy.sample_rate)
-        commitment_loss = out["vq/commitment_loss"]
-        codebook_loss = out["vq/codebook_loss"]
-
-        output["adv/disc_loss"] = gan_loss.discriminator_loss(recons, signal)
-        output["stft/loss"] = stft_loss(recons, signal)
-        output["mel/loss"] = mel_loss(recons, signal)
-        output["waveform/loss"] = waveform_loss(recons, signal)
-        output["sisdr/loss"] = sisdr_loss(recons.audio_data, signal.audio_data)
-        output["adv/gen_loss"], output["adv/feat_loss"] = gan_loss.generator_loss(recons, signal)
-        output["vq/commitment_loss"] = commitment_loss
-        output["vq/codebook_loss"] = codebook_loss
-        output["loss"] = sum([v * output[k] for k, v in loss_weights.items() if k in output])
-
-    # Discriminator backward and optimization
-    optimizer_d.zero_grad()
-    scaler.scale(output["adv/disc_loss"]).backward()
-    scaler.unscale_(optimizer_d)
-    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 10.0)
-    scaler.step(optimizer_d)
-    scaler.update()
-
-    # Generator backward and optimization
-    optimizer_g.zero_grad()
-    scaler.scale(output["loss"]).backward()
-    scaler.unscale_(optimizer_g)
-    #output["other/grad_norm"] = torch.nn.utils.clip_grad_norm_(generator.parameters(), 1e3)
-    scaler.step(optimizer_g)
-    scaler.update()
-
-    log_data = {k: v.item() if torch.is_tensor(v) else v for k, v in output.items()}
-
-    if use_wandb:
-        wandb.log(log_data)
-
-    return {k: v for k, v in sorted(output.items())}
-
 # Training loop function
 #############################################
 def train_loop(voice_noisy,
