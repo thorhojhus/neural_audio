@@ -36,14 +36,25 @@ noise_folder = './data/noise_fullband'
 
 lr = 1e-4
 batch_size = 2
-n_epochs = 1
+n_epochs = 2
 do_print = True
 use_wandb = True
 snr = 5
-use_custom_activation = False
-use_pretrained = True
+use_custom_activation = True
+use_pretrained = False
 save_state_dict = False
 act_func = nn.SiLU()
+
+### Custom activation function ###
+@torch.jit.script
+def sse_activation(x, alpha, beta):
+    return torch.exp(beta * torch.sin(alpha * x).pow(2))
+
+@torch.jit.script
+def lpa_activation(x, alpha, beta, n):
+    sigmoid = 1 / (1 + torch.exp(-alpha * x))
+    polynomial = beta * x.pow(n)
+    return sigmoid * polynomial
 
 if use_wandb:
     wandb.init(
@@ -113,16 +124,16 @@ if gpu_ok:
     #discriminator = torch.compile(discriminator, mode="default")
     print("Model compiled for GPU")
 
-msd = MultiScaleDiscriminator().to(device)
-mpd = MultiPeriodDiscriminator().to(device)    
+MSD = MultiScaleDiscriminator().to(device)
+MPD = MultiPeriodDiscriminator().to(device)    
 
 #subjective_model = SQUIM_SUBJECTIVE.get_model()
 
 # Optimizers
 #############################################
-optimizer_g = optim.Adam(generator.parameters(), lr=lr)
-optimizer_msd = optim.Adam(msd.parameters(), lr=lr)
-optimizer_mpd = optim.Adam(mpd.parameters(), lr=lr)
+optimizer_g = optim.Adam(generator.parameters(), lr=lr, betas=(0.9, 0.999))
+optimizer_msd = optim.Adam(MSD.parameters(), lr=lr, betas=(0.9, 0.999))
+optimizer_mpd = optim.Adam(MPD.parameters(), lr=lr, betas=(0.9, 0.999))
 
 
 # Losses
@@ -140,13 +151,13 @@ sdr_loss = SDR().to(device)
 loss_weights = {
     "mel/loss": 45.0,  
     "adv/feat_loss": 5.0,
-    "adv/gen_loss": 2.0, 
+    "adv/gen_loss": 5.0, 
     "vq/commitment_loss": 0.5, 
     "vq/codebook_loss": 1.0, 
-    "waveform/loss": 5.0,
+    "waveform/loss": 45.0,
     "stft/loss": 1.0,  
-    "sisdr/loss": 5.0,
-    "sdr/loss": 5.0,
+    "sisdr/loss": 1.0,
+    "sdr/loss": 1.0,
 }
 
 if use_wandb:
@@ -194,8 +205,8 @@ def train_loop(voice_noisy, voice_clean):
     voice_noisy, voice_clean = prep_batch(voice_noisy), prep_batch(voice_clean)
 
     generator.train()
-    msd.train()
-    mpd.train()
+    MSD.train()
+    MPD.train()
 
     output = {}
     signal = voice_clean["signal"]
@@ -212,11 +223,11 @@ def train_loop(voice_noisy, voice_clean):
     optimizer_msd.zero_grad()
     
     # MPD
-    y_d_rs_mpd, y_d_gs_mpd, _, _ = mpd(signal.audio_data, recons.clone().detach().audio_data)
+    y_d_rs_mpd, y_d_gs_mpd, _, _ = MPD(signal.audio_data, recons.clone().detach().audio_data)
     output["adv/disc_loss_mpd"], _, _ = discriminator_loss(y_d_rs_mpd, y_d_gs_mpd)
 
     # MSD
-    y_d_rs_msd, y_d_gs_msd, _, _ = msd(signal.audio_data, recons.clone().detach().audio_data)
+    y_d_rs_msd, y_d_gs_msd, _, _ = MSD(signal.audio_data, recons.clone().detach().audio_data)
     output["adv/disc_loss_msd"], _, _ = discriminator_loss(y_d_rs_msd, y_d_gs_msd)
 
     # Update Discriminators
@@ -231,11 +242,11 @@ def train_loop(voice_noisy, voice_clean):
     optimizer_g.zero_grad()
 
     # Feature and Generator Losses
-    y_d_rs, y_d_gs, fmap_rs, fmap_gs = mpd(signal.audio_data, recons.audio_data)
+    y_d_rs, y_d_gs, fmap_rs, fmap_gs = MPD(signal.audio_data, recons.audio_data)
     feat_loss_mpd = feature_loss(fmap_rs, fmap_gs)
     msd_gen_loss, _ = generator_loss(y_d_gs)
     
-    y_d_r_msd, y_d_g_msd, fmap_r_msd, fmap_g_msd = msd(signal.audio_data, recons.audio_data)    
+    y_d_r_msd, y_d_g_msd, fmap_r_msd, fmap_g_msd = MSD(signal.audio_data, recons.audio_data)    
     feat_loss_msd = feature_loss(fmap_r_msd, fmap_g_msd)
     mpd_gen_loss, _ = generator_loss(y_d_g_msd)
     
@@ -308,24 +319,25 @@ def save_samples(epoch, i):
 # Training loop
 #############################################
 print("Starting training")
+for epoch in range(n_epochs):
 
-for i, (voice_clean, noise) in enumerate(zip(voice_dataloader, noise_dataloader)):
-    
-    # Choose one noise file from 
-    voice_noisy = make_noisy(voice_clean, noise).to(device)
+    for i, (voice_clean, noise) in enumerate(zip(voice_dataloader, noise_dataloader)):
+        
+        # Choose one noise file from 
+        voice_noisy = make_noisy(voice_clean, noise).to(device)
 
-    out = train_loop(voice_noisy, voice_clean)
+        out = train_loop(voice_noisy, voice_clean)
 
-    if (i % 100 == 0) & (i != 0):
-        if do_print:
-            print(f"\nBatch {i}:\n")
-            pretty_print_output(out)
-        generator.eval()
-        save_samples(0, i)
-        output = val_loop(voice_noisy, voice_clean)
-        if do_print:
-            print("\nValidation:\n")
-            pretty_print_output(output)
+        if (i % 100 == 0) & (i != 0):
+            if do_print:
+                print(f"\nBatch {i}:\n")
+                pretty_print_output(out)
+            generator.eval()
+            save_samples(0, i)
+            output = val_loop(voice_noisy, voice_clean)
+            if do_print:
+                print("\nValidation:\n")
+                pretty_print_output(output)
 
 if save_state_dict:
     torch.save(generator.state_dict(), f"./output/dac_model_{i}.pth")
