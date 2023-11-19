@@ -4,3 +4,4 @@ output/
 __pycache__/
 wandb/
 .vscode/
+deep_learning_audio_project.code-workspace
