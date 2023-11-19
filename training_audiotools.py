@@ -25,18 +25,19 @@ gpu_ok = False
 if torch.cuda.is_available():
     device = "cuda"
     torch.backends.cudnn.benchmark = True
-    device_cap = torch.cuda.get_device_capability()
-    if device_cap in ((7, 0), (8, 0), (9, 0)):
-        gpu_ok = True    
+    torch.backends.cuda.matmul.allow_tf32 = True
+    # device_cap = torch.cuda.get_device_capability()
+    # if device_cap in ((7, 0), (8, 0), (9, 0)):
+    #     gpu_ok = True    
 
-# voice_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
-# noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
+voice_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
+noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
 
-voice_folder = './data/voice_fullband'
-noise_folder = './data/noise_fullband'
+#voice_folder = './data/voice_fullband'
+#noise_folder = './data/noise_fullband'
 
 lr = 1e-4
-batch_size = 2
+batch_size = 4
 n_epochs = 1
 do_print = True
 use_wandb = False
@@ -113,7 +114,7 @@ if use_custom_activation:
 
 if gpu_ok:
     generator = torch.compile(generator, mode="default")
-    discriminator = torch.compile(discriminator, mode="default")
+    #discriminator = torch.compile(discriminator, mode="default")
     print("Model compiled for GPU")
     
 
