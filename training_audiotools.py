@@ -3,6 +3,7 @@ from audiotools import AudioSignal
 from flatten_dict import flatten, unflatten
 from torchmetrics.audio import SignalDistortionRatio as SDR
 import torch
+from torch import nn
 import torch.optim as optim
 
 from torch.utils.data import Dataset, DataLoader
@@ -11,16 +12,22 @@ from torch.cuda.amp import GradScaler, autocast
 
 import numpy as np
 import os
-
 import dac
+from dac.nn.layers import snake, Snake1d
 from dac.nn.loss import L1Loss, MelSpectrogramLoss, SISDRLoss, MultiScaleSTFTLoss, GANLoss
 import wandb
 
+import warnings
+warnings.filterwarnings("ignore")
 
 device = "cpu"
+gpu_ok = False
 if torch.cuda.is_available():
     device = "cuda"
     torch.backends.cudnn.benchmark = True
+    device_cap = torch.cuda.get_device_capability()
+    if device_cap in ((7, 0), (8, 0), (9, 0)):
+        gpu_ok = True    
 
 # voice_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
 # noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
@@ -29,11 +36,15 @@ voice_folder = './data/voice_fullband'
 noise_folder = './data/noise_fullband'
 
 lr = 1e-4
-batch_size = 4
+batch_size = 2
 n_epochs = 1
-do_print = False
-use_wandb = True
+do_print = True
+use_wandb = False
 snr = 10
+use_custom_activation = True
+use_pretrained = True
+save_state_dict = False
+act_func = nn.SiLU()
 
 if use_wandb:
     wandb.init(
@@ -43,11 +54,15 @@ if use_wandb:
         # track hyperparameters and run metadata
         config={
         "learning_rate": lr,
-        "architecture": "VQ-VAE",
+        "architecture": "descript-audio-codec",
         "dataset": "VCTK",
         "epochs": n_epochs,
         "batch_size" : batch_size,
         "SNR" : snr,
+        "Custom activation" : use_custom_activation,
+        "Activation function" : act_func.__name__,
+        "Pretrained" : use_pretrained,
+
         }
     )
 
@@ -57,31 +72,51 @@ def count_files(directory):
         file_count += len(files)
     return file_count
 
+def change_activation_function(model):
+    for name, module in model.named_children():
+        if isinstance(module, Snake1d):
+            setattr(model, name, act_func)
+        else:
+            change_activation_function(module)
 
 
 # Dataloaders and datasets
 #############################################
 voice_loader = AudioLoader(sources=[voice_folder], shuffle=False)
-#voice_count = count_files(voice_folder)
 noise_loader = AudioLoader(sources=[noise_folder], shuffle=True)
-#noise_count = count_files(noise_folder)
-#print(f"Number of voice files {voice_count}")
-#print(f"Number of noise files {noise_count}")
+
 voice_dataset_save = AudioDataset(voice_loader,n_examples=48000, sample_rate=44100, duration = 7.0)
 noise_dataset_save = AudioDataset(noise_loader, n_examples=48000, sample_rate=44100, duration = 7.0)
 
-
 voice_dataset = AudioDataset(voice_loader,n_examples=48000, sample_rate=44100, duration = 0.5)
 noise_dataset = AudioDataset(noise_loader, n_examples=48000, sample_rate=44100, duration = 0.5)
+
 voice_dataloader = DataLoader(voice_dataset, batch_size=batch_size, shuffle=False, collate_fn=voice_dataset.collate, pin_memory=True)
 noise_dataloader = DataLoader(noise_dataset, batch_size=batch_size, shuffle=True, collate_fn=noise_dataset.collate, pin_memory=True)
 
 
 # Models
 #############################################
-model_path = dac.utils.download(model_type="44khz")
-generator = dac.DAC.load(model_path).to(device)
+if use_pretrained:
+    model_path = dac.utils.download(model_type="44khz")
+    generator = dac.DAC.load(model_path).to(device)
+    print("Pretrained model loaded")
+else:
+    generator = dac.DAC().to(device)
+    print("New model created")
+
 discriminator = dac.model.Discriminator().to(device)
+
+if use_custom_activation:
+    change_activation_function(generator)
+    print("Custom activation function applied")
+
+if gpu_ok:
+    generator = torch.compile(generator, mode="default")
+    discriminator = torch.compile(discriminator, mode="default")
+    print("Model compiled for GPU")
+    
+
 #subjective_model = SQUIM_SUBJECTIVE.get_model()
 
 # Optimizers
@@ -103,7 +138,7 @@ sdr_loss = SDR().to(device)
 # Weighting for losses
 #############################################
 loss_weights = {
-    "mel/loss": 50.0, 
+    "mel/loss": 100.0, 
     "adv/feat_loss": 10.0, 
     "adv/gen_loss": 10.0, 
     "vq/commitment_loss": 0.25, 
@@ -264,4 +299,6 @@ for i, (voice_clean, noise) in enumerate(zip(voice_dataloader, noise_dataloader)
             print("\nValidation:\n")
             pretty_print_output(output)
 
-torch.save(generator.state_dict(), f"./output/dac_model_{i}.pth")
+if save_state_dict:
+    torch.save(generator.state_dict(), f"./output/dac_model_{i}.pth")
+    torch.save(discriminator.state_dict(), f"./output/discriminator_{i}.pth")
