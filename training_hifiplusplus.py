@@ -5,11 +5,8 @@ from torchmetrics.audio import SignalDistortionRatio as SDR
 import torch
 from torch import nn
 import torch.optim as optim
-
 from torch.utils.data import Dataset, DataLoader
 from torch.cuda.amp import GradScaler, autocast
-
-
 import numpy as np
 import os
 import dac
@@ -26,24 +23,24 @@ gpu_ok = False
 if torch.cuda.is_available():
     device = "cuda"
     torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
+    #torch.backends.cuda.matmul.allow_tf32 = True
     # device_cap = torch.cuda.get_device_capability()
     # if device_cap in ((7, 0), (8, 0), (9, 0)):
     #     gpu_ok = True    
 
-voice_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
-noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
+#voice_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
+#noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
 
-#voice_folder = './data/voice_fullband'
-#noise_folder = './data/noise_fullband'
+voice_folder = './data/voice_fullband'
+noise_folder = './data/noise_fullband'
 
 lr = 1e-4
-batch_size = 4
+batch_size = 2
 n_epochs = 1
 do_print = True
-use_wandb = False
-snr = 10
-use_custom_activation = True
+use_wandb = True
+snr = 5
+use_custom_activation = False
 use_pretrained = True
 save_state_dict = False
 act_func = nn.SiLU()
@@ -62,7 +59,7 @@ if use_wandb:
         "batch_size" : batch_size,
         "SNR" : snr,
         "Custom activation" : use_custom_activation,
-        "Activation function" : act_func.__name__,
+        #"Activation function" : act_func.__name__,
         "Pretrained" : use_pretrained,
 
         }
@@ -87,11 +84,11 @@ def change_activation_function(model):
 voice_loader = AudioLoader(sources=[voice_folder], shuffle=False)
 noise_loader = AudioLoader(sources=[noise_folder], shuffle=True)
 
-voice_dataset_save = AudioDataset(voice_loader,n_examples=48000, sample_rate=44100, duration = 7.0)
-noise_dataset_save = AudioDataset(noise_loader, n_examples=48000, sample_rate=44100, duration = 7.0)
+voice_dataset_save = AudioDataset(voice_loader,n_examples=2700, sample_rate=44100, duration = 7.0)
+noise_dataset_save = AudioDataset(noise_loader, n_examples=2700, sample_rate=44100, duration = 7.0)
 
-voice_dataset = AudioDataset(voice_loader,n_examples=48000, sample_rate=44100, duration = 0.5)
-noise_dataset = AudioDataset(noise_loader, n_examples=48000, sample_rate=44100, duration = 0.5)
+voice_dataset = AudioDataset(voice_loader,n_examples=2700, sample_rate=44100, duration = 0.5)
+noise_dataset = AudioDataset(noise_loader, n_examples=2700, sample_rate=44100, duration = 0.5)
 
 voice_dataloader = DataLoader(voice_dataset, batch_size=batch_size, shuffle=False, collate_fn=voice_dataset.collate, pin_memory=True)
 noise_dataloader = DataLoader(noise_dataset, batch_size=batch_size, shuffle=True, collate_fn=noise_dataset.collate, pin_memory=True)
@@ -142,13 +139,14 @@ sdr_loss = SDR().to(device)
 #############################################
 loss_weights = {
     "mel/loss": 45.0,  
-    "adv/disc_loss_mpd": 1.0, 
-    "adv/disc_loss_msd": 1.0,  
-    "adv/gen_loss": 5.0, 
+    "adv/feat_loss": 5.0,
+    "adv/gen_loss": 2.0, 
     "vq/commitment_loss": 0.5, 
-    "vq/codebook_loss": 2.0, 
+    "vq/codebook_loss": 1.0, 
+    "waveform/loss": 5.0,
     "stft/loss": 1.0,  
-    "sisdr/loss": 10.0 
+    "sisdr/loss": 5.0,
+    "sdr/loss": 5.0,
 }
 
 if use_wandb:
@@ -208,36 +206,53 @@ def train_loop(voice_noisy, voice_clean):
     commitment_loss = out["vq/commitment_loss"]
     codebook_loss = out["vq/codebook_loss"]
 
-    # Discriminator (MPD and MSD) Forward Pass and Loss Calculation
-    y_mpd_hat_r, y_mpd_hat_g, _, _ = mpd(signal, recons.detach())
-    loss_disc_mpd, _, _ = discriminator_loss(y_mpd_hat_r, y_mpd_hat_g)
-    output["adv/disc_loss_mpd"] = loss_disc_mpd
-
-    y_msd_hat_r, y_msd_hat_g, _, _ = msd(signal, recons.detach())
-    loss_disc_msd, _, _ = discriminator_loss(y_msd_hat_r, y_msd_hat_g)
-    output["adv/disc_loss_msd"] = loss_disc_msd
-
-    loss_disc_all = loss_disc_mpd + loss_disc_msd
-    output["adv/disc_loss_all"] = loss_disc_all
-
-    # Update Discriminators
+    ### Discriminator Losses ###
+    ############################
     optimizer_mpd.zero_grad()
     optimizer_msd.zero_grad()
-    loss_disc_all.backward()
+    
+    # MPD
+    y_d_rs_mpd, y_d_gs_mpd, _, _ = mpd(signal.audio_data, recons.clone().detach().audio_data)
+    output["adv/disc_loss_mpd"], _, _ = discriminator_loss(y_d_rs_mpd, y_d_gs_mpd)
+
+    # MSD
+    y_d_rs_msd, y_d_gs_msd, _, _ = msd(signal.audio_data, recons.clone().detach().audio_data)
+    output["adv/disc_loss_msd"], _, _ = discriminator_loss(y_d_rs_msd, y_d_gs_msd)
+
+    # Update Discriminators
+    output["adv/disc_loss_mpd"].backward()
     optimizer_mpd.step()
+
+    output["adv/disc_loss_msd"].backward()
     optimizer_msd.step()
+
+    ### Generator Losses ###
+    ########################
+    optimizer_g.zero_grad()
+
+    # Feature and Generator Losses
+    y_d_rs, y_d_gs, fmap_rs, fmap_gs = mpd(signal.audio_data, recons.audio_data)
+    feat_loss_mpd = feature_loss(fmap_rs, fmap_gs)
+    msd_gen_loss, _ = generator_loss(y_d_gs)
+    
+    y_d_r_msd, y_d_g_msd, fmap_r_msd, fmap_g_msd = msd(signal.audio_data, recons.audio_data)    
+    feat_loss_msd = feature_loss(fmap_r_msd, fmap_g_msd)
+    mpd_gen_loss, _ = generator_loss(y_d_g_msd)
+    
+    output["adv/feat_loss"] = feat_loss_msd + feat_loss_mpd
+    output["adv/gen_loss"] = msd_gen_loss + mpd_gen_loss
 
     # Other Losses
     output["stft/loss"] = stft_loss(recons, signal)
     output["mel/loss"] = mel_loss(recons, signal)
     output["waveform/loss"] = waveform_loss(recons, signal)
     output["sisdr/loss"] = sisdr_loss(recons.audio_data, signal.audio_data)
+    output["sdr/loss"] = -sdr_loss(recons.audio_data, signal.audio_data)
     output["vq/commitment_loss"] = commitment_loss
     output["vq/codebook_loss"] = codebook_loss
     output["loss"] = sum([v * output[k] for k, v in loss_weights.items() if k in output])
 
     # Update Generator
-    optimizer_g.zero_grad()
     output["loss"].backward()
     optimizer_g.step()
     output["other/grad_norm"] = torch.nn.utils.clip_grad_norm_(generator.parameters(), 1e3)
