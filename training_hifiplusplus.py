@@ -13,9 +13,9 @@ from torch.cuda.amp import GradScaler, autocast
 import numpy as np
 import os
 import dac
-from hifiplusplus import MultiPeriodDiscriminator, MultiScaleDiscriminator, discriminator_loss, generator_loss, feature_loss
+from hifiplusplus_discriminator import MultiPeriodDiscriminator, MultiScaleDiscriminator, discriminator_loss, generator_loss, feature_loss
 from dac.nn.layers import snake, Snake1d
-from dac.nn.loss import L1Loss, MelSpectrogramLoss, SISDRLoss, MultiScaleSTFTLoss, GANLoss
+from dac.nn.loss import L1Loss, MelSpectrogramLoss, SISDRLoss, MultiScaleSTFTLoss
 import wandb
 
 import warnings
@@ -299,8 +299,6 @@ for i, (voice_clean, noise) in enumerate(zip(voice_dataloader, noise_dataloader)
     # Choose one noise file from 
     voice_noisy = make_noisy(voice_clean, noise).to(device)
 
-    generator.train()
-    discriminator.train()
     out = train_loop(voice_noisy, voice_clean)
 
     if (i % 100 == 0) & (i != 0):
@@ -316,4 +314,4 @@ for i, (voice_clean, noise) in enumerate(zip(voice_dataloader, noise_dataloader)
 
 if save_state_dict:
     torch.save(generator.state_dict(), f"./output/dac_model_{i}.pth")
-    torch.save(discriminator.state_dict(), f"./output/discriminator_{i}.pth")
+    #torch.save(discriminator.state_dict(), f"./output/discriminator_{i}.pth")
