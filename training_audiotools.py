@@ -2,6 +2,8 @@ from audiotools.data.datasets import AudioDataset, AudioLoader
 from audiotools import AudioSignal
 from flatten_dict import flatten, unflatten
 from torchmetrics.audio import SignalDistortionRatio as SDR
+from torchaudio.pipelines import SQUIM_OBJECTIVE, SQUIM_SUBJECTIVE
+
 import torch
 from torch import nn
 import torch.optim as optim
@@ -37,15 +39,16 @@ noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_full
 #noise_folder = './data/noise_fullband'
 
 lr = 1e-4
-batch_size = 4
+batch_size = 2
 n_epochs = 1
 do_print = True
 use_wandb = False
 snr = 10
-use_custom_activation = True
+use_custom_activation = False
 use_pretrained = True
 save_state_dict = False
 act_func = nn.SiLU()
+use_mos = True
 
 if use_wandb:
     wandb.init(
@@ -117,8 +120,9 @@ if gpu_ok:
     #discriminator = torch.compile(discriminator, mode="default")
     print("Model compiled for GPU")
     
-
-#subjective_model = SQUIM_SUBJECTIVE.get_model()
+if use_mos:
+    subjective_model = SQUIM_SUBJECTIVE.get_model().to(device)
+    objective_model = SQUIM_OBJECTIVE.get_model().to(device)
 
 # Optimizers
 #############################################
@@ -246,8 +250,12 @@ def val_loop(voice_noisy,
     signal = voice_clean["signal"]
     out = generator(voice_noisy.audio_data, voice_noisy.sample_rate)
     recons = AudioSignal(out["audio"], voice_noisy.sample_rate)
-    output["SI-SDR"] = sisdr_loss(recons.audio_data, signal.audio_data)
-    #output["mos"] = subjective_model(recons.audio_data, signal.audio_data)
+    
+    output["MOS"] = subjective_model(recons.audio_data.squeeze(1), signal.audio_data.squeeze(1)).mean()
+    
+    stoi, pesq, si_sdr = objective_model(recons.audio_data.squeeze(1))
+    output["STOI"],output["PESQ"], output["SI-SDR"] = stoi.mean(), pesq.mean(), si_sdr.mean()
+
     log_data = {k: v.item() if torch.is_tensor(v) else v for k, v in output.items()}
     if use_wandb:
         wandb.log(log_data)

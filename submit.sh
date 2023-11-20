@@ -20,4 +20,4 @@
 module swap python3/3.10.11
 module swap cuda/12.1
 
-python3 /zhome/5c/8/186818/deep_learning_audio_project/training_audiotools_submit.py
+python3 /zhome/5c/8/186818/deep_learning_audio_project/training_hifiplusplus.py

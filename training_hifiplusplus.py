@@ -13,6 +13,7 @@ import dac
 from hifiplusplus_discriminator import MultiPeriodDiscriminator, MultiScaleDiscriminator, discriminator_loss, generator_loss, feature_loss
 from dac.nn.layers import snake, Snake1d
 from dac.nn.loss import L1Loss, MelSpectrogramLoss, SISDRLoss, MultiScaleSTFTLoss
+from torchaudio.pipelines import SQUIM_OBJECTIVE, SQUIM_SUBJECTIVE
 import wandb
 
 import warnings
@@ -23,7 +24,7 @@ gpu_ok = False
 if torch.cuda.is_available():
     device = "cuda"
     torch.backends.cudnn.benchmark = True
-    #torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cuda.matmul.allow_tf32 = True
     # device_cap = torch.cuda.get_device_capability()
     # if device_cap in ((7, 0), (8, 0), (9, 0)):
     #     gpu_ok = True    
@@ -35,16 +36,18 @@ noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_full
 #noise_folder = './data/noise_fullband'
 
 lr = 1e-4
-batch_size = 2
-n_epochs = 2
-do_print = True
-use_wandb = False
-snr = 5
+batch_size = 16 # 16 for 40GB
+n_epochs = 1
+do_print = False
+use_wandb = True
+snr = 0
 use_custom_activation = False
 use_pretrained = True
-save_state_dict = False
+save_state_dict = True
 act_func = nn.SiLU()
 n_samples = 48000
+use_mos = True
+sample_rate = 44100
 
 ### Custom activation function ###
 @torch.jit.script
@@ -96,11 +99,11 @@ def change_activation_function(model):
 voice_loader = AudioLoader(sources=[voice_folder], shuffle=False)
 noise_loader = AudioLoader(sources=[noise_folder], shuffle=True)
 
-voice_dataset_save = AudioDataset(voice_loader,n_examples=48000, sample_rate=44100, duration = 7.0)
-noise_dataset_save = AudioDataset(noise_loader, n_examples=48000, sample_rate=44100, duration = 7.0)
+voice_dataset_save = AudioDataset(voice_loader,n_examples=n_samples, sample_rate=sample_rate, duration = 7.0)
+noise_dataset_save = AudioDataset(noise_loader, n_examples=n_samples, sample_rate=sample_rate, duration = 7.0)
 
-voice_dataset = AudioDataset(voice_loader,n_examples=48000, sample_rate=44100, duration = 0.5)
-noise_dataset = AudioDataset(noise_loader, n_examples=48000, sample_rate=44100, duration = 0.5)
+voice_dataset = AudioDataset(voice_loader,n_examples=n_samples, sample_rate=sample_rate, duration = 0.5)
+noise_dataset = AudioDataset(noise_loader, n_examples=n_samples, sample_rate=sample_rate, duration = 0.5)
 
 voice_dataloader = DataLoader(voice_dataset, batch_size=batch_size, shuffle=False, collate_fn=voice_dataset.collate, pin_memory=True)
 noise_dataloader = DataLoader(noise_dataset, batch_size=batch_size, shuffle=True, collate_fn=noise_dataset.collate, pin_memory=True)
@@ -125,10 +128,12 @@ if gpu_ok:
     #discriminator = torch.compile(discriminator, mode="default")
     print("Model compiled for GPU")
 
+if use_mos:
+    subjective_model = SQUIM_SUBJECTIVE.get_model().to(device)
+    objective_model = SQUIM_OBJECTIVE.get_model().to(device)
+
 MSD = MultiScaleDiscriminator().to(device)
 MPD = MultiPeriodDiscriminator().to(device)    
-
-#subjective_model = SQUIM_SUBJECTIVE.get_model()
 
 # Optimizers
 #############################################
@@ -160,9 +165,6 @@ loss_weights = {
     "sisdr/loss": 1.0,
     "sdr/loss": 1.0,
 }
-
-if use_wandb:
-    wandb.log(loss_weights)
 
 # Helper functions
 #############################################
@@ -287,8 +289,12 @@ def val_loop(voice_noisy,
     signal = voice_clean["signal"]
     out = generator(voice_noisy.audio_data, voice_noisy.sample_rate)
     recons = AudioSignal(out["audio"], voice_noisy.sample_rate)
-    output["SI-SDR"] = sisdr_loss(recons.audio_data, signal.audio_data)
-    #output["mos"] = subjective_model(recons.audio_data, signal.audio_data)
+    
+    output["MOS"] = subjective_model(recons.audio_data.squeeze(1), signal.audio_data.squeeze(1)).mean()
+    
+    stoi, pesq, si_sdr = objective_model(recons.audio_data.squeeze(1))
+    output["STOI"],output["PESQ"], output["SI-SDR"] = stoi.mean(), pesq.mean(), si_sdr.mean()
+
     log_data = {k: v.item() if torch.is_tensor(v) else v for k, v in output.items()}
     if use_wandb:
         wandb.log(log_data)
@@ -339,7 +345,7 @@ for epoch in range(n_epochs):
             if do_print:
                 print("\nValidation:\n")
                 pretty_print_output(output)
-
-if save_state_dict:
-    torch.save(generator.state_dict(), f"./output/dac_model_{i}.pth")
-    #torch.save(discriminator.state_dict(), f"./output/discriminator_{i}.pth")
+            
+            if (i%1000 == 0):
+                if save_state_dict:
+                    torch.save(generator.state_dict(), f"./models/dac_hifi_disc_{i}.pth")
