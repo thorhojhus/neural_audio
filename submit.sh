@@ -1,6 +1,6 @@
 #!/bin/sh
 #BSUB -q gpua100
-#BSUB -R "select[gpu80gb]"
+#BSUB -R "select[gpu40gb]"
 #BSUB -J train_descript_audiocodec
 #BSUB -n 8
 #BSUB -R "span[hosts=1]"
