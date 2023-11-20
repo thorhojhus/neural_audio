@@ -37,7 +37,7 @@ noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_full
 #noise_folder = './data/noise_fullband'
 
 lr = 1e-4
-batch_size = 32
+batch_size = 4
 n_epochs = 1
 do_print = False
 use_wandb = True
@@ -45,7 +45,7 @@ snr = 10
 use_custom_activation = True
 use_pretrained = True
 save_state_dict = True
-act_func = nn.SiLU()
+act_func = nn.SiLU
 
 if use_wandb:
     wandb.init(

@@ -23,7 +23,7 @@ gpu_ok = False
 if torch.cuda.is_available():
     device = "cuda"
     torch.backends.cudnn.benchmark = True
-    #torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cuda.matmul.allow_tf32 = True
     # device_cap = torch.cuda.get_device_capability()
     # if device_cap in ((7, 0), (8, 0), (9, 0)):
     #     gpu_ok = True    
@@ -35,14 +35,14 @@ noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_full
 #noise_folder = './data/noise_fullband'
 
 lr = 1e-4
-batch_size = 2
-n_epochs = 2
-do_print = True
+batch_size = 12
+n_epochs = 1
+do_print = False
 use_wandb = False
 snr = 5
-use_custom_activation = False
+use_custom_activation = True
 use_pretrained = True
-save_state_dict = False
+save_state_dict = True
 act_func = nn.SiLU()
 n_samples = 48000
 
@@ -65,13 +65,13 @@ if use_wandb:
         # track hyperparameters and run metadata
         config={
         "learning_rate": lr,
-        "architecture": "descript-audio-codec",
+        "architecture": "descript-audio-codec_hifi++_silu",
         "dataset": "VCTK",
         "epochs": n_epochs,
         "batch_size" : batch_size,
         "SNR" : snr,
         "Custom activation" : use_custom_activation,
-        #"Activation function" : act_func.__name__,
+        "Activation function" : act_func.__class__.__name__,
         "Pretrained" : use_pretrained,
 
         }
@@ -341,5 +341,5 @@ for epoch in range(n_epochs):
                 pretty_print_output(output)
 
 if save_state_dict:
-    torch.save(generator.state_dict(), f"./output/dac_model_{i}.pth")
+    torch.save(generator.state_dict(), f"./output/dac_model_hifi_silu{i}.pth")
     #torch.save(discriminator.state_dict(), f"./output/discriminator_{i}.pth")

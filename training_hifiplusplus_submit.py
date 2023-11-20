@@ -23,7 +23,7 @@ gpu_ok = False
 if torch.cuda.is_available():
     device = "cuda"
     torch.backends.cudnn.benchmark = True
-    #torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cuda.matmul.allow_tf32 = True
     # device_cap = torch.cuda.get_device_capability()
     # if device_cap in ((7, 0), (8, 0), (9, 0)):
     #     gpu_ok = True    
@@ -35,15 +35,15 @@ noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_full
 #noise_folder = './data/noise_fullband'
 
 lr = 1e-4
-batch_size = 2
-n_epochs = 2
-do_print = True
-use_wandb = False
+batch_size = 12
+n_epochs = 1
+do_print = False
+use_wandb = True
 snr = 5
 use_custom_activation = False
 use_pretrained = True
 save_state_dict = False
-act_func = nn.SiLU()
+act_func = nn.SiLU
 n_samples = 48000
 
 ### Custom activation function ###
@@ -65,7 +65,7 @@ if use_wandb:
         # track hyperparameters and run metadata
         config={
         "learning_rate": lr,
-        "architecture": "descript-audio-codec",
+        "architecture": "descript-audio-codec_hifi++",
         "dataset": "VCTK",
         "epochs": n_epochs,
         "batch_size" : batch_size,
@@ -96,11 +96,11 @@ def change_activation_function(model):
 voice_loader = AudioLoader(sources=[voice_folder], shuffle=False)
 noise_loader = AudioLoader(sources=[noise_folder], shuffle=True)
 
-voice_dataset_save = AudioDataset(voice_loader,n_examples=48000, sample_rate=44100, duration = 7.0)
-noise_dataset_save = AudioDataset(noise_loader, n_examples=48000, sample_rate=44100, duration = 7.0)
+voice_dataset_save = AudioDataset(voice_loader,n_examples=n_samples, sample_rate=44100, duration = 7.0)
+noise_dataset_save = AudioDataset(noise_loader, n_examples=n_samples, sample_rate=44100, duration = 7.0)
 
-voice_dataset = AudioDataset(voice_loader,n_examples=48000, sample_rate=44100, duration = 0.5)
-noise_dataset = AudioDataset(noise_loader, n_examples=48000, sample_rate=44100, duration = 0.5)
+voice_dataset = AudioDataset(voice_loader,n_examples=n_samples, sample_rate=44100, duration = 0.5)
+noise_dataset = AudioDataset(noise_loader, n_examples=n_samples, sample_rate=44100, duration = 0.5)
 
 voice_dataloader = DataLoader(voice_dataset, batch_size=batch_size, shuffle=False, collate_fn=voice_dataset.collate, pin_memory=True)
 noise_dataloader = DataLoader(noise_dataset, batch_size=batch_size, shuffle=True, collate_fn=noise_dataset.collate, pin_memory=True)
@@ -341,5 +341,5 @@ for epoch in range(n_epochs):
                 pretty_print_output(output)
 
 if save_state_dict:
-    torch.save(generator.state_dict(), f"./output/dac_model_{i}.pth")
+    torch.save(generator.state_dict(), f"./output/dac_model_hifi_{i}.pth")
     #torch.save(discriminator.state_dict(), f"./output/discriminator_{i}.pth")
