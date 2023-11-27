@@ -49,17 +49,6 @@ n_samples = 48000
 use_mos = True
 sample_rate = 44100
 
-### Custom activation function ###
-@torch.jit.script
-def sse_activation(x, alpha, beta):
-    return torch.exp(beta * torch.sin(alpha * x).pow(2))
-
-@torch.jit.script
-def lpa_activation(x, alpha, beta, n):
-    sigmoid = 1 / (1 + torch.exp(-alpha * x))
-    polynomial = beta * x.pow(n)
-    return sigmoid * polynomial
-
 if use_wandb:
     wandb.init(
         # set the wandb project where this run will be logged
