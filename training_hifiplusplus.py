@@ -1,23 +1,26 @@
-from audiotools.data.datasets import AudioDataset, AudioLoader
-from audiotools import AudioSignal
-from flatten_dict import flatten, unflatten
-from torchmetrics.audio import SignalDistortionRatio as SDR
-import torch
-from torch import nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import GradScaler, autocast
-import numpy as np
-import os
-import dac
-from hifiplusplus_discriminator import MultiPeriodDiscriminator, MultiScaleDiscriminator, discriminator_loss, generator_loss, feature_loss
-from dac.nn.layers import snake, Snake1d
-from dac.nn.loss import L1Loss, MelSpectrogramLoss, SISDRLoss, MultiScaleSTFTLoss
-import wandb
-import json
 import argparse
+import json
+import os
 import warnings
+
+import numpy as np
+import torch
+import torch.optim as optim
+import wandb
+from torch import nn
+from torch.utils.data import Dataset, DataLoader
+from torchmetrics.audio import SignalDistortionRatio as SDR
+
+from audiotools import AudioSignal
+from audiotools.data.datasets import AudioDataset, AudioLoader
+from dac import DAC
+from dac.nn.layers import snake, Snake1d
+from dac.nn.loss import *
+from flatten_dict import flatten, unflatten
+from hifiplusplus_discriminator import *
+
 warnings.filterwarnings("ignore")
+
 
 device = "cpu"
 if torch.cuda.is_available():
@@ -177,7 +180,7 @@ def pretty_print_output(output : dict):
 # Training loop function
 #############################################
 def train_loop(voice_noisy, voice_clean):
-    
+
     voice_noisy, voice_clean = prep_batch(voice_noisy), prep_batch(voice_clean)
 
     generator.train()
