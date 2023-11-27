@@ -13,7 +13,7 @@ from torchmetrics.audio import SignalDistortionRatio as SDR
 
 from audiotools import AudioSignal
 from audiotools.data.datasets import AudioDataset, AudioLoader
-from dac import DAC
+import dac
 from dac.nn.layers import snake, Snake1d
 from dac.nn.loss import *
 from flatten_dict import flatten, unflatten
