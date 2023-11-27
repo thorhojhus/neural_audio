@@ -5,3 +5,5 @@ __pycache__/
 wandb/
 .vscode/
 deep_learning_audio_project.code-workspace
+models/dac_hifi_disc_1000.pth
+models/dac_hifi_disc_2000.pth
