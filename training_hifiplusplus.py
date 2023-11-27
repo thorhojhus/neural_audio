@@ -34,35 +34,17 @@ args = parser.parse_args()
 
 with open(args.config, 'r') as file: config = json.load(file)
 
-voice_folder = config["voice_folder"]
-noise_folder = config["noise_folder"]
-lr = config["learning_rate"]
-beta1 = config["beta1"]
-beta2 = config["beta2"]
-batch_size = config["batch_size"] # 16 for 40GB
-n_epochs = config["n_epochs"]
-do_print = config["do_print"]
-use_wandb = config["use_wandb"]
-snr = config["snr"]
-use_custom_activation = config["use_custom_activation"]
-use_pretrained = config["use_pretrained"]
-save_state_dict = config["save_state_dict"]
-act_func = nn.SiLU() 
-n_samples = config["n_samples"]
-sample_rate = config["sample_rate"]
-use_mos = config["use_mos"]
+custom_act_func = nn.SiLU() 
+
 
 ### Custom activation functions ###
 @torch.jit.script
 def sse_activation(x, alpha, beta): return torch.exp(beta * torch.sin(alpha * x).pow(2))
 
 @torch.jit.script
-def lpa_activation(x, alpha, beta, n):
-    sigmoid = 1 / (1 + torch.exp(-alpha * x))
-    polynomial = beta * x.pow(n)
-    return sigmoid * polynomial
+def lpa_activation(x, alpha, beta, n): return (1 / (1 + torch.exp(-alpha * x))) * beta * x.pow(n)
 
-if use_wandb:
+if config["use_wandb"]:
     wandb.init(
         # set the wandb project where this run will be logged
         project="Audio-project",
@@ -78,38 +60,38 @@ def count_files(directory):
 def change_activation_function(model):
     for name, module in model.named_children():
         if isinstance(module, Snake1d):
-            setattr(model, name, act_func)
+            setattr(model, name, custom_act_func)
         else:
             change_activation_function(module)
 
 
 # Dataloaders and datasets
 #############################################
-voice_loader = AudioLoader(sources=[voice_folder], shuffle=False)
-noise_loader = AudioLoader(sources=[noise_folder], shuffle=True)
+voice_loader = AudioLoader(sources=[config["voice_folder"]], shuffle=False)
+noise_loader = AudioLoader(sources=[config["noise_folder"]], shuffle=True)
 
-voice_dataset_save = AudioDataset(voice_loader,n_examples=n_samples, sample_rate=sample_rate, duration = 5.0)
-noise_dataset_save = AudioDataset(noise_loader, n_examples=n_samples, sample_rate=sample_rate, duration = 5.0)
+voice_dataset_save = AudioDataset(voice_loader,n_examples=config["n_samples"], sample_rate=config["sample_rate"], duration = 5.0)
+noise_dataset_save = AudioDataset(noise_loader, n_examples=config["n_samples"], sample_rate=config["sample_rate"], duration = 5.0)
 
-voice_dataset = AudioDataset(voice_loader,n_examples=n_samples, sample_rate=sample_rate, duration = 0.5)
-noise_dataset = AudioDataset(noise_loader, n_examples=n_samples, sample_rate=sample_rate, duration = 0.5)
+voice_dataset = AudioDataset(voice_loader,n_examples=config["n_samples"], sample_rate=config["sample_rate"], duration = 0.5)
+noise_dataset = AudioDataset(noise_loader, n_examples=config["n_samples"], sample_rate=config["sample_rate"], duration = 0.5)
 
-voice_dataloader = DataLoader(voice_dataset, batch_size=batch_size, shuffle=False, collate_fn=voice_dataset.collate, pin_memory=True)
-noise_dataloader = DataLoader(noise_dataset, batch_size=batch_size, shuffle=True, collate_fn=noise_dataset.collate, pin_memory=True)
+voice_dataloader = DataLoader(voice_dataset, batch_size=config["batch_size"], shuffle=False, collate_fn=voice_dataset.collate, pin_memory=True)
+noise_dataloader = DataLoader(noise_dataset, batch_size=config["batch_size"], shuffle=True, collate_fn=noise_dataset.collate, pin_memory=True)
 
 
 # Models
 #############################################
-if use_pretrained:
+if config["use_pretrained"]:
     model_path = dac.utils.download(model_type="44khz")
     generator = dac.DAC.load(model_path).to(device)
 else:
     generator = dac.DAC().to(device)
 
-if use_custom_activation:
+if config["use_custom_activation"]:
     change_activation_function(generator)
 
-if use_mos:
+if config["use_mos"]:
     from torchaudio.pipelines import SQUIM_OBJECTIVE, SQUIM_SUBJECTIVE
     subjective_model = SQUIM_SUBJECTIVE.get_model().to(device)
     objective_model = SQUIM_OBJECTIVE.get_model().to(device)
@@ -119,9 +101,9 @@ MPD = MultiPeriodDiscriminator().to(device)
 
 # Optimizers
 #############################################
-optimizer_g = optim.AdamW(generator.parameters(), lr=lr, betas=(beta1, beta2))
-optimizer_msd = optim.AdamW(MSD.parameters(), lr=lr, betas=(beta1, beta2))
-optimizer_mpd = optim.AdamW(MPD.parameters(), lr=lr, betas=(beta1, beta2))
+optimizer_g = optim.AdamW(generator.parameters(), lr=config["learning_rate"], betas=(config["beta1"], config["beta2"]))
+optimizer_msd = optim.AdamW(MSD.parameters(), lr=config["learning_rate"], betas=(config["beta1"], config["beta2"]))
+optimizer_mpd = optim.AdamW(MPD.parameters(), lr=config["learning_rate"], betas=(config["beta1"], config["beta2"]))
 
 
 # Losses
@@ -149,7 +131,7 @@ loss_weights = {
 
 # Helper functions
 #############################################
-def make_noisy(clean : AudioSignal, noise : AudioSignal): return clean.clone().mix(noise, snr=snr)
+def make_noisy(clean : AudioSignal, noise : AudioSignal): return clean.clone().mix(noise, snr=config["snr"])
 
 
 def prep_batch(batch):
@@ -250,7 +232,7 @@ def train_loop(voice_noisy, voice_clean):
     # Logging
     log_data = {k: v.item() if torch.is_tensor(v) else v for k, v in output.items()}
     
-    if use_wandb:
+    if config["use_wandb"]:
         wandb.log(log_data)
 
     return output
@@ -266,7 +248,7 @@ def val_loop(voice_noisy,
     out = generator(voice_noisy.audio_data, voice_noisy.sample_rate)
     recons = AudioSignal(out["audio"], voice_noisy.sample_rate)
     
-    if use_mos:
+    if config["use_mos"]:
         output["MOS"] = subjective_model(recons.audio_data.squeeze(1), signal.audio_data.squeeze(1)).mean()
         
         stoi, pesq, si_sdr = objective_model(recons.audio_data.squeeze(1))
@@ -274,7 +256,7 @@ def val_loop(voice_noisy,
 
     log_data = {k: v.item() if torch.is_tensor(v) else v for k, v in output.items()}
 
-    if use_wandb:
+    if config["use_wandb"]:
         wandb.log(log_data)
 
     return {k: v.item() if torch.is_tensor(v) else v for k, v in sorted(output.items())}
@@ -295,7 +277,7 @@ def save_samples(epoch, i):
     noisy.cpu().write(noisy_path)
     clean["signal"].cpu().write(clean_path)
     
-    if use_wandb:
+    if config["use_wandb"]:
         wandb.log({"Reconstructed Audio": wandb.Audio(recons_path, caption=f"Reconstructed Epoch {epoch} Batch {i}"),
                 "Noisy Audio": wandb.Audio(noisy_path, caption=f"Noisy Epoch {epoch} Batch {i}"),
                 "Clean Audio": wandb.Audio(clean_path, caption=f"Clean Epoch {epoch} Batch {i}")})
@@ -303,7 +285,7 @@ def save_samples(epoch, i):
 # Training loop
 #############################################
 print("Starting training")
-for epoch in range(n_epochs):
+for epoch in range(config["n_epochs"]):
 
     for i, (voice_clean, noise) in enumerate(zip(voice_dataloader, noise_dataloader)):
         
@@ -311,16 +293,16 @@ for epoch in range(n_epochs):
 
         out = train_loop(voice_noisy, voice_clean)
         if (i % 100 == 0) & (i != 0):
-            if do_print:
+            if config["do_print"]:
                 print(f"\nBatch {i}:\n")
                 pretty_print_output(out)
             generator.eval()
             save_samples(0, i)
             output = val_loop(voice_noisy, voice_clean)
-            if do_print:
+            if config["do_print"]:
                 print("\nValidation:\n")
                 pretty_print_output(output)
             
             if (i%1000 == 0):
-                if save_state_dict:
+                if config["save_state_dict"]:
                     torch.save(generator.state_dict(), f"./models/dac_hifi_e{epoch}_it{i}.pth")
