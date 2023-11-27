@@ -20,14 +20,10 @@ import warnings
 warnings.filterwarnings("ignore")
 
 device = "cpu"
-gpu_ok = False
 if torch.cuda.is_available():
     device = "cuda"
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
-    # device_cap = torch.cuda.get_device_capability()
-    # if device_cap in ((7, 0), (8, 0), (9, 0)):
-    #     gpu_ok = True    
 
 voice_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
 noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
@@ -49,7 +45,7 @@ n_samples = 48000
 use_mos = True
 sample_rate = 44100
 
-### Custom activation function ###
+### Custom activation functions ###
 @torch.jit.script
 def sse_activation(x, alpha, beta):
     return torch.exp(beta * torch.sin(alpha * x).pow(2))
@@ -74,7 +70,7 @@ if use_wandb:
         "batch_size" : batch_size,
         "SNR" : snr,
         "Custom activation" : use_custom_activation,
-        #"Activation function" : act_func.__name__,
+        "Activation function" : act_func.__class__.__name__ if use_custom_activation else "Snake",
         "Pretrained" : use_pretrained,
 
         }
@@ -122,11 +118,6 @@ else:
 if use_custom_activation:
     change_activation_function(generator)
     print("Custom activation function applied")
-
-if gpu_ok:
-    generator = torch.compile(generator, mode="default")
-    #discriminator = torch.compile(discriminator, mode="default")
-    print("Model compiled for GPU")
 
 if use_mos:
     subjective_model = SQUIM_SUBJECTIVE.get_model().to(device)
