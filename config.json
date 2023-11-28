@@ -6,8 +6,9 @@
     "n_epochs": 1,
     "do_print": true,
     "use_wandb": false,
-    "snr": 5,
-    "use_custom_activation": false,
+    "snr": 10,
+    "use_custom_activation": true,
+    "custom_act_func": "sine",
     "use_pretrained": true,
     "save_state_dict": false,    
     "n_samples": 48000,
@@ -18,6 +19,6 @@
     "val_interval": 100,
     "save_state_dict_interval": 5000,
     "use_scheduler": false,
-    "hpp_disc" : false,
-    "dac_disc" : true
+    "hpp_disc" : true,
+    "dac_disc" : false
 }

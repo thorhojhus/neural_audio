@@ -41,12 +41,29 @@ with open(args.config, 'r') as file: config = json.load(file)
 
 ### Custom activation functions ###
 @torch.jit.script
-def sse_activation(x, alpha, beta): return torch.exp(beta * torch.sin(alpha * x).pow(2))
+def sine(x, beta):
+    shape = x.shape
+    x = x.reshape(shape[0], shape[1], -1)
+    x = x + torch.sin(beta * x)
+    x = x.reshape(shape)
+    return x
 
-@torch.jit.script
-def lpa_activation(x, alpha, beta, n): return (1 / (1 + torch.exp(-alpha * x))) * beta * x.pow(n)
+class Sine1d(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.beta = nn.Parameter(torch.ones(1, channels, 1))
 
-custom_act_func = nn.SiLU() 
+    def forward(self, x):
+        return sine(x, self.beta)
+
+if config["custom_act_func"] == "silu":
+    custom_act_func = nn.SiLU()
+if config["custom_act_func"] == "selu":
+    custom_act_func = nn.SELU()
+if config["custom_act_func"] == "sine":
+    custom_act_func = Sine1d(1).to(device)
+if config["custom_act_func"] == "tanh":
+    custom_act_func = nn.Tanh()
 
 ### Wandb setup ###
 if config["use_wandb"]:
@@ -97,12 +114,14 @@ dataloader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, 
 ### DAC model ###
 if config["use_pretrained"]:
     model_path = dac.utils.download(model_type="44khz")
-    generator = dac.DAC.load(model_path).to(device)
+    generator = dac.DAC.load(model_path)
 else:
-    generator = dac.DAC().to(device)
+    generator = dac.DAC()
 
 if config["use_custom_activation"]:
     change_activation_function(generator)
+
+generator = generator.to(device)
 
 optimizer_gen = optim.AdamW(generator.parameters(), lr=config["learning_rate"], betas=(config["beta1"], config["beta2"]))
 
