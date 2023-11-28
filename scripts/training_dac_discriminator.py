@@ -2,7 +2,6 @@ from audiotools.data.datasets import AudioDataset, AudioLoader
 from audiotools import AudioSignal
 from flatten_dict import flatten, unflatten
 from torchmetrics.audio import SignalDistortionRatio as SDR
-from torchaudio.pipelines import SQUIM_OBJECTIVE, SQUIM_SUBJECTIVE
 
 import torch
 from torch import nn
@@ -32,11 +31,11 @@ if torch.cuda.is_available():
     # if device_cap in ((7, 0), (8, 0), (9, 0)):
     #     gpu_ok = True    
 
-voice_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
-noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
+#voice_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/clean_fullband/vctk_wav48_silence_trimmed/'
+#noise_folder = '/work3/s164396/data/DNS-Challenge-4/datasets_fullband/noise_fullband'
 
-#voice_folder = './data/voice_fullband'
-#noise_folder = './data/noise_fullband'
+voice_folder = './data/voice_fullband'
+noise_folder = './data/noise_fullband'
 
 lr = 1e-4
 batch_size = 2
@@ -48,7 +47,7 @@ use_custom_activation = False
 use_pretrained = True
 save_state_dict = False
 act_func = nn.SiLU()
-use_mos = True
+use_mos = False
 
 if use_wandb:
     wandb.init(
@@ -121,6 +120,7 @@ if gpu_ok:
     print("Model compiled for GPU")
     
 if use_mos:
+    from torchaudio.pipelines import SQUIM_OBJECTIVE, SQUIM_SUBJECTIVE
     subjective_model = SQUIM_SUBJECTIVE.get_model().to(device)
     objective_model = SQUIM_OBJECTIVE.get_model().to(device)
 
@@ -250,11 +250,11 @@ def val_loop(voice_noisy,
     signal = voice_clean["signal"]
     out = generator(voice_noisy.audio_data, voice_noisy.sample_rate)
     recons = AudioSignal(out["audio"], voice_noisy.sample_rate)
+    if use_mos:
+        output["MOS"] = subjective_model(recons.audio_data.squeeze(1), signal.audio_data.squeeze(1)).mean()
     
-    output["MOS"] = subjective_model(recons.audio_data.squeeze(1), signal.audio_data.squeeze(1)).mean()
-    
-    stoi, pesq, si_sdr = objective_model(recons.audio_data.squeeze(1))
-    output["STOI"],output["PESQ"], output["SI-SDR"] = stoi.mean(), pesq.mean(), si_sdr.mean()
+        stoi, pesq, si_sdr = objective_model(recons.audio_data.squeeze(1))
+        output["STOI"],output["PESQ"], output["SI-SDR"] = stoi.mean(), pesq.mean(), si_sdr.mean()
 
     log_data = {k: v.item() if torch.is_tensor(v) else v for k, v in output.items()}
     if use_wandb:
