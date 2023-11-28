@@ -20,12 +20,19 @@ from dac.nn.layers import snake, Snake1d
 from dac.nn.loss import *
 from flatten_dict import flatten, unflatten
 
+
+
+# Config and setup
+#############################################
+
+### Device setup ###
 device = "cpu"
 if torch.cuda.is_available():
     device = "cuda"
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
+### Argument parsing ###
 parser = argparse.ArgumentParser(description="Run training with specified configuration")
 parser.add_argument("-c", "--config", default="config.json", help="Path to configuration file")
 args = parser.parse_args()
@@ -41,12 +48,22 @@ def lpa_activation(x, alpha, beta, n): return (1 / (1 + torch.exp(-alpha * x))) 
 
 custom_act_func = nn.SiLU() 
 
+### Wandb setup ###
 if config["use_wandb"]:
     wandb.init(
-        # set the wandb project where this run will be logged
         project="Audio-project",
         config=config,
     )
+
+# Utility functions
+#############################################
+def add_noise(clean : AudioSignal, noise : AudioSignal): return clean.clone().mix(noise, snr=config["snr"])
+
+def pretty_print_output(output : dict):
+    pretty_output = {k: (v.detach().cpu().numpy() if torch.is_tensor(v) else v) for k, v in output.items()}
+    pretty_output_str = {k: np.array_str(v, precision=4, suppress_small=True) if isinstance(v, np.ndarray) else v for k, v in pretty_output.items()}
+    for key, value in pretty_output_str.items():
+        print(f"{key}: {value}")
 
 def count_files(directory):
     file_count = 0
@@ -64,21 +81,20 @@ def change_activation_function(model):
 
 # Dataloaders and datasets
 #############################################
-voice_loader = AudioLoader(sources=[config["voice_folder"]], shuffle=False)
-noise_loader = AudioLoader(sources=[config["noise_folder"]], shuffle=True)
+audioloaders = {
+    "voice": AudioLoader(sources=[config["voice_folder"]], shuffle=False),
+    "noise": AudioLoader(sources=[config["noise_folder"]], shuffle=True)
+    }
 
-voice_dataset_save = AudioDataset(voice_loader,n_examples=config["n_samples"], sample_rate=config["sample_rate"], duration = 5.0)
-noise_dataset_save = AudioDataset(noise_loader, n_examples=config["n_samples"], sample_rate=config["sample_rate"], duration = 5.0)
+# Use different dataset for saving samples for longer audio samples
+dataset_val = AudioDataset(audioloaders,n_examples=config["n_samples"], sample_rate=config["sample_rate"], duration = 5.0)
+dataset = AudioDataset(audioloaders,n_examples=config["n_samples"], sample_rate=config["sample_rate"], duration = 0.5)
+dataloader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, collate_fn=dataset.collate, pin_memory=True)
 
-voice_dataset = AudioDataset(voice_loader,n_examples=config["n_samples"], sample_rate=config["sample_rate"], duration = 0.5)
-noise_dataset = AudioDataset(noise_loader, n_examples=config["n_samples"], sample_rate=config["sample_rate"], duration = 0.5)
-
-voice_dataloader = DataLoader(voice_dataset, batch_size=config["batch_size"], shuffle=False, collate_fn=voice_dataset.collate, pin_memory=True)
-noise_dataloader = DataLoader(noise_dataset, batch_size=config["batch_size"], shuffle=True, collate_fn=noise_dataset.collate, pin_memory=True)
-
-
-# Models
+# Models and optimizers
 #############################################
+
+### DAC model ###
 if config["use_pretrained"]:
     model_path = dac.utils.download(model_type="44khz")
     generator = dac.DAC.load(model_path).to(device)
@@ -88,31 +104,30 @@ else:
 if config["use_custom_activation"]:
     change_activation_function(generator)
 
+optimizer_gen = optim.AdamW(generator.parameters(), lr=config["learning_rate"], betas=(config["beta1"], config["beta2"]))
+
+### Mean Opinion Score models ###
 if config["use_mos"]:
     from torchaudio.pipelines import SQUIM_OBJECTIVE, SQUIM_SUBJECTIVE
     subjective_model = SQUIM_SUBJECTIVE.get_model().to(device)
     objective_model = SQUIM_OBJECTIVE.get_model().to(device)
 
+### Hifi-plus-plus discriminators ###
 if config["hpp_disc"]:
     from hifiplusplus_discriminator import *
-    MSD = MultiScaleDiscriminator().to(device)
-    MPD = MultiPeriodDiscriminator().to(device)
-
-if config["dac_disc"]:
-    dac_disc = dac.model.Discriminator().to(device)
-
-# Optimizers
-#############################################
-optimizer_gen = optim.AdamW(generator.parameters(), lr=config["learning_rate"], betas=(config["beta1"], config["beta2"]))
-
-if config["hpp_disc"]:
+    MSD = MultiScaleDiscriminator().to(device).train()
+    MPD = MultiPeriodDiscriminator().to(device).train()
     optimizer_msd = optim.AdamW(MSD.parameters(), lr=config["learning_rate"], betas=(config["beta1"], config["beta2"]))
     optimizer_mpd = optim.AdamW(MPD.parameters(), lr=config["learning_rate"], betas=(config["beta1"], config["beta2"]))
 
+#### Descript audio codec discriminator ###
 if config["dac_disc"]:
+    dac_disc = dac.model.Discriminator().to(device).train()
     optimizer_dac_disc = optim.AdamW(dac_disc.parameters(), lr=config["learning_rate"], betas=(config["beta1"], config["beta2"]))
 
+### Schedulers ###
 scheduler = StepLR(optimizer_gen, step_size=30, gamma=0.1) if config["use_scheduler"] else None
+
 
 # Losses
 #############################################
@@ -138,15 +153,6 @@ loss_weights = {
     "sdr/loss": 1.0,
 }
 
-# Helper functions
-#############################################
-def add_noise(clean : AudioSignal, noise : AudioSignal): return clean.clone().mix(noise, snr=config["snr"])
-
-def pretty_print_output(output : dict):
-    pretty_output = {k: (v.detach().cpu().numpy() if torch.is_tensor(v) else v) for k, v in output.items()}
-    pretty_output_str = {k: np.array_str(v, precision=4, suppress_small=True) if isinstance(v, np.ndarray) else v for k, v in pretty_output.items()}
-    for key, value in pretty_output_str.items():
-        print(f"{key}: {value}")
 
 # Training loop function
 #############################################
@@ -155,13 +161,6 @@ def train_loop(noisy_signal : AudioSignal, signal : AudioSignal):
     # Set models to train mode
     generator.train()
 
-    if config["hpp_disc"]:
-        MSD.train()
-        MPD.train()
-
-    if config["dac_disc"]:
-        dac_disc.train()
-    
     output = {}
 
     # Generator Forward Pass
@@ -265,8 +264,10 @@ def val_loop(noisy_signal : AudioSignal,
 @torch.no_grad()
 def save_samples(epoch : int, i : int):
     generator.eval()
+
     # Create samples
-    noise, clean = noise_dataset_save[i]["signal"].to(device), voice_dataset_save[i]["signal"].to(device)
+    noise, clean = dataset_val[i]["noise"]["signal"], dataset_val[i]["voice"]["signal"]
+    noise, clean = noise.to(device), clean.to(device)
     noisy_signal = add_noise(clean, noise)
     out = generator(noisy_signal.audio_data.to(device), noisy_signal.sample_rate)["audio"]
     recons = AudioSignal(out, 44100)
@@ -290,20 +291,28 @@ def save_samples(epoch : int, i : int):
 # Training loop
 #############################################
 print("Starting training") if config["do_print"] else None
+
 for epoch in range(config["n_epochs"]):
 
-    for i, (signal, noise) in enumerate(zip(voice_dataloader, noise_dataloader)):
-        signal, noise = signal["signal"].to(device), noise["signal"].to(device)
+    for i, batch in enumerate(dataloader):
+        
+        # Load data and add noise
+        signal, noise = batch["voice"]["signal"].to(device), batch["noise"]["signal"].to(device)
         noisy_signal = add_noise(signal, noise)
 
         out = train_loop(noisy_signal, signal)
-        if (i%config["val_interval"] == 0) & (i != 0):
+        
+        if (i%config["val_interval"] == 0):
+
             if config["do_print"]:
                 print(f"\nBatch {i}:\n")
                 pretty_print_output(out)
-
+            
+            # Sample and log
             save_samples(epoch, i)
             val_loop(noisy_signal, signal)
+
+        # Save state dict
         if (i%config["save_state_dict_interval"] == 0) & (i != 0):
             if config["save_state_dict"]:
                 generator.eval()
