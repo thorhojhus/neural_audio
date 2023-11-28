@@ -133,26 +133,6 @@ loss_weights = {
 #############################################
 def make_noisy(clean : AudioSignal, noise : AudioSignal): return clean.clone().mix(noise, snr=config["snr"])
 
-
-def prep_batch(batch):
-    if isinstance(batch, dict):
-        batch = flatten(batch)
-        for key, val in batch.items():
-            try:
-                batch[key] = val.to(device)
-            except:
-                pass
-        batch = unflatten(batch)
-    elif torch.is_tensor(batch):
-        batch = batch.to(device)
-    elif isinstance(batch, list):
-        for i in range(len(batch)):
-            try:
-                batch[i] = batch[i].to(device)
-            except:
-                pass
-    return batch
-
 def pretty_print_output(output : dict):
     pretty_output = {k: (v.detach().cpu().numpy() if torch.is_tensor(v) else v) for k, v in output.items()}
     pretty_output_str = {k: np.array_str(v, precision=4, suppress_small=True) if isinstance(v, np.ndarray) else v for k, v in pretty_output.items()}
@@ -161,20 +141,16 @@ def pretty_print_output(output : dict):
 
 # Training loop function
 #############################################
-def train_loop(voice_noisy, voice_clean):
-
-    voice_noisy, voice_clean = prep_batch(voice_noisy), prep_batch(voice_clean)
+def train_loop(noisy_signal : AudioSignal, signal : AudioSignal):
 
     generator.train()
     MSD.train()
     MPD.train()
-
     output = {}
-    signal = voice_clean["signal"]
 
     # Generator Forward Pass
-    out = generator(voice_noisy.audio_data, voice_noisy.sample_rate)
-    recons = AudioSignal(out["audio"], voice_noisy.sample_rate)
+    out = generator(noisy_signal.audio_data, noisy_signal.sample_rate)["audio"]
+    recons = AudioSignal(out, noisy_signal.sample_rate)
     commitment_loss = out["vq/commitment_loss"]
     codebook_loss = out["vq/codebook_loss"]
 
@@ -239,14 +215,12 @@ def train_loop(voice_noisy, voice_clean):
 
 
 @torch.no_grad()
-def val_loop(voice_noisy,
-             voice_clean):
+def val_loop(noisy_signal : AudioSignal,
+             signal : AudioSignal):
     
-    voice_noisy, voice_clean = prep_batch(voice_noisy), prep_batch(voice_clean)
     output = {}
-    signal = voice_clean["signal"]
-    out = generator(voice_noisy.audio_data, voice_noisy.sample_rate)
-    recons = AudioSignal(out["audio"], voice_noisy.sample_rate)
+    out = generator(noisy_signal.audio_data, noisy_signal.sample_rate)
+    recons = AudioSignal(out["audio"], noisy_signal.sample_rate)
     
     if config["use_mos"]:
         output["MOS"] = subjective_model(recons.audio_data.squeeze(1), signal.audio_data.squeeze(1)).mean()
@@ -262,20 +236,20 @@ def val_loop(voice_noisy,
     return {k: v.item() if torch.is_tensor(v) else v for k, v in sorted(output.items())}
 
 @torch.no_grad()
-def save_samples(epoch, i):
-    noise, clean = noise_dataset_save[i], voice_dataset_save[i]
-    noisy = make_noisy(clean, noise).to(device)
+def save_samples(epoch : int, i : int):
+    noise, clean = noise_dataset_save[i]["signal"].to(device), voice_dataset_save[i]["signal"].to(device)
+    noisy = make_noisy(clean, noise)
 
     out = generator(noisy.audio_data.to(device), noisy.sample_rate)["audio"]
-    recons = AudioSignal(out.detach().cpu(), 44100)
+    recons = AudioSignal(out.detach(), 44100)
 
     recons_path = f"./output/recons_e{epoch}b{i}.wav"
     noisy_path = f"./output/noisy_e{epoch}b{i}.wav"
     clean_path = f"./output/clean_e{epoch}b{i}.wav"
 
-    recons.write(recons_path)
+    recons.cpu().write(recons_path)
     noisy.cpu().write(noisy_path)
-    clean["signal"].cpu().write(clean_path)
+    clean.cpu().write(clean_path)
     
     if config["use_wandb"]:
         wandb.log({"Reconstructed Audio": wandb.Audio(recons_path, caption=f"Reconstructed Epoch {epoch} Batch {i}"),
@@ -284,25 +258,25 @@ def save_samples(epoch, i):
 
 # Training loop
 #############################################
-print("Starting training")
+print("Starting training") if config["do_print"] else None
 for epoch in range(config["n_epochs"]):
 
-    for i, (voice_clean, noise) in enumerate(zip(voice_dataloader, noise_dataloader)):
-        
-        voice_noisy = make_noisy(voice_clean["signal"], noise["signal"]).to(device)
+    for i, (signal, noise) in enumerate(zip(voice_dataloader, noise_dataloader)):
+        signal, noise = signal["signal"].to(device), noise["signal"].to(device)
+        noisy_signal = make_noisy(signal, noise)
 
-        out = train_loop(voice_noisy, voice_clean)
-        if (i % 100 == 0) & (i != 0):
+        out = train_loop(noisy_signal, signal)
+        if (i%config["val_interval"] == 0) & (i != 0):
             if config["do_print"]:
                 print(f"\nBatch {i}:\n")
                 pretty_print_output(out)
             generator.eval()
             save_samples(0, i)
-            output = val_loop(voice_noisy, voice_clean)
+            output = val_loop(noisy_signal, signal)
             if config["do_print"]:
                 print("\nValidation:\n")
                 pretty_print_output(output)
             
-            if (i%1000 == 0):
-                if config["save_state_dict"]:
-                    torch.save(generator.state_dict(), f"./models/dac_hifi_e{epoch}_it{i}.pth")
+        if (i%config["save_state_dict_interval"] == 0) & (i != 0):
+            if config["save_state_dict"]:
+                torch.save(generator.state_dict(), f"./models/dac_hifi_e{epoch}_it{i}.pth")
