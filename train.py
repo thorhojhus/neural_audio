@@ -12,6 +12,7 @@ from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
 from torchmetrics.audio import SignalDistortionRatio as SDR
 from torch.profiler import profile, record_function, ProfilerActivity
+import torchaudio
 import wandb
 from audiotools import AudioSignal
 from audiotools.data.datasets import AudioDataset, AudioLoader
@@ -271,8 +272,9 @@ def val_loop(noisy_signal : AudioSignal,
 
     # Get perceptual metrics
     if config["use_mos"]:
-        output["MOS"] = subjective_model(recons.audio_data.squeeze(1), signal.audio_data.squeeze(1)).mean()
-        stoi, pesq, si_sdr = objective_model(recons.audio_data.squeeze(1))
+        recons_16khz, signal_16khz = torchaudio.functional.resample(recons.audio_data, config["sample_rate"], 16000).squeeze(1), torchaudio.functional.resample(signal.audio_data, config["sample_rate"], 16000).squeeze(1)
+        output["MOS"] = subjective_model(recons_16khz, signal_16khz).mean()
+        stoi, pesq, si_sdr = objective_model(recons_16khz)
         output["STOI"],output["PESQ"], output["SI-SDR"] = stoi.mean(), pesq.mean(), si_sdr.mean()
     
     # Log and print
