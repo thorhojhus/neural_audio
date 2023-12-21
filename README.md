@@ -31,6 +31,8 @@ To train on DTU HPC with appropriate dataset run:
 train.py -c ./configs/config_HPC.json
 ```
 
+To run inference of the trained model weights use the notebook called "test_model_weights.ipynb". Download weights from [Drive](https://drive.google.com/file/d/1nzz7Wr5SxFlNqCa23OXjyAmxuYBudwfA/view?usp=sharing) and place in models folder.
+
 Adjust hyperparameters such as learning rates, batch sizes, folder setup and epochs within the config file.
 
 ## Output
