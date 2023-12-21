@@ -8,7 +8,7 @@
     "use_wandb": false,
     "snr": 5,
     "use_custom_activation": false,
-    "custom_act_func": "sine",
+    "custom_act_func": "selu",
     "use_pretrained": true,
     "save_state_dict": false,    
     "n_samples": 48000,
